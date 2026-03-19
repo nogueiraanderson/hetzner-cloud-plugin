@@ -75,18 +75,15 @@ public class HetznerCloud extends AbstractCloudImpl {
     }
 
     /**
-     * Pick random template from provided list.
+     * Rank templates by DC health: healthy DCs first, unhealthy last.
+     * Within each partition, templates are shuffled randomly.
+     * When all DCs are healthy (normal case), equivalent to random shuffle.
      *
      * @param matchingTemplates List of all matching templates.
-     * @return picked template
+     * @return ranked list (healthy first)
      */
-    private static HetznerServerTemplate pickTemplate(List<HetznerServerTemplate> matchingTemplates) {
-        if (matchingTemplates.size() == 1) {
-            return matchingTemplates.get(0);
-        }
-        final List<HetznerServerTemplate> shuffled = new ArrayList<>(matchingTemplates);
-        Collections.shuffle(shuffled);
-        return shuffled.get(0);
+    static List<HetznerServerTemplate> rankTemplatesByHealth(List<HetznerServerTemplate> matchingTemplates) {
+        return DcHealthTracker.sortByHealth(matchingTemplates);
     }
 
     @DataBoundSetter
@@ -138,7 +135,8 @@ public class HetznerCloud extends AbstractCloudImpl {
                 int running = runningNodeCount();
                 int instanceCap = getInstanceCap();
                 int available = instanceCap - running;
-                final HetznerServerTemplate template = pickTemplate(matchingTemplates);
+                final List<HetznerServerTemplate> rankedTemplates = rankTemplatesByHealth(matchingTemplates);
+                final HetznerServerTemplate template = rankedTemplates.get(0);
                 log.info("Creating new agent with {} executors, have {} running VMs", template.getNumExecutors(), running);
                 if (available <= 0) {
                     log.warn("Cloud capacity reached ({}). Has {} VMs running, but want {} more executors",
@@ -153,8 +151,8 @@ public class HetznerCloud extends AbstractCloudImpl {
                     plannedNodes.add(new TrackedPlannedNode(
                                     provisioningId,
                                     agent.getNumExecutors(),
-                                    Computer.threadPoolForRemoting.submit(new NodeCallable(agent, this)
-                                    )
+                                    Computer.threadPoolForRemoting.submit(
+                                            new NodeCallable(agent, this, rankedTemplates))
                             )
                     );
                     excessWorkload -= agent.getNumExecutors();

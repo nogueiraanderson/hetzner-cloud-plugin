@@ -22,19 +22,39 @@ import hudson.model.Computer;
 import hudson.model.Node;
 import hudson.remoting.VirtualChannel;
 import jenkins.model.Jenkins;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
-@RequiredArgsConstructor
 class NodeCallable implements Callable<Node> {
     private final HetznerServerAgent agent;
     private final HetznerCloud cloud;
+    private final List<HetznerServerTemplate> rankedTemplates;
+
+    /**
+     * Constructor with DC failover support.
+     * @param agent the agent being provisioned (uses first template)
+     * @param cloud the cloud instance
+     * @param rankedTemplates templates sorted by DC health (healthy first)
+     */
+    NodeCallable(HetznerServerAgent agent, HetznerCloud cloud,
+                 List<HetznerServerTemplate> rankedTemplates) {
+        this.agent = agent;
+        this.cloud = cloud;
+        this.rankedTemplates = rankedTemplates;
+    }
+
+    /** Backward-compatible constructor (no failover). */
+    NodeCallable(HetznerServerAgent agent, HetznerCloud cloud) {
+        this(agent, cloud, Collections.singletonList(agent.getTemplate()));
+    }
 
     @Override
     public Node call() throws Exception {
@@ -42,12 +62,45 @@ class NodeCallable implements Callable<Node> {
         if (computer != null && computer.isOnline()) {
             return agent;
         }
+
+        // Try provisioning with failover across DCs
+        Exception lastException = null;
+        for (int i = 0; i < rankedTemplates.size(); i++) {
+            HetznerServerTemplate template = rankedTemplates.get(i);
+            String location = template.getLocation();
+            try {
+                Node result = doProvision(template);
+                DcHealthTracker.recordSuccess(location);
+                return result;
+            } catch (HetznerProvisioningException e) {
+                lastException = e;
+                DcHealthTracker.recordFailure(location);
+                if (e.isResourceUnavailable() && i < rankedTemplates.size() - 1) {
+                    log.warn("DC {} unavailable ({}), trying next DC ({}/{})",
+                            location, e.getHetznerErrorCode(),
+                            i + 1, rankedTemplates.size());
+                    continue;
+                }
+                // Non-retryable error or last template; give up
+                throw e;
+            }
+        }
+        // Should not reach here, but just in case
+        throw lastException != null ? lastException
+                : new IllegalStateException("No templates available for provisioning");
+    }
+
+    /**
+     * Provision a single server using the given template.
+     * Extracted from the original call() method for retry support.
+     */
+    private Node doProvision(HetznerServerTemplate template) throws Exception {
         final HetznerServerInfo serverInfo = cloud.getResourceManager().createServer(agent);
         agent.setServerInstance(serverInfo);
         final String serverName = serverInfo.getServerDetail().getName();
         try {
             boolean running = false;
-            final int bootDeadline = agent.getTemplate().getBootDeadline();
+            final int bootDeadline = template.getBootDeadline();
             //wait for status == "running", but at most bootDeadline minutes
             final WaitStrategy waitStrategy = new WaitStrategy(bootDeadline, 45, 15);
             while (!waitStrategy.isDeadLineOver()) {
@@ -64,13 +117,11 @@ class NodeCallable implements Callable<Node> {
                     serverName, serverInfo.getServerDetail().getId(), bootDeadline);
 
             // Option A: Pre-boot architecture validation via API response.
-            // The Hetzner API returns the actual server_type in the response,
-            // which may differ from what was requested during availability incidents.
-            validateArchitectureFromApi(agent.getTemplate().getServerType(),
+            validateArchitectureFromApi(template.getServerType(),
                     serverInfo.getServerDetail().getServerType(), serverName);
 
             Jenkins.get().addNode(agent);
-            computer = agent.toComputer();
+            Computer computer = agent.toComputer();
             int retry = 5;
             boolean connected = false;
             if (computer != null) {
@@ -95,10 +146,7 @@ class NodeCallable implements Callable<Node> {
                         + "' (server id=" + serverInfo.getServerDetail().getId() + ")");
             }
             // Option C: Post-boot architecture validation via uname -m.
-            // Ground truth from the actual hardware, catches mismatches that
-            // even the API might not report (e.g., Hetzner availability incidents
-            // where ARM requests get fulfilled with x86 hardware).
-            validateArchitectureFromHardware(computer, agent.getTemplate().getServerType(), serverName);
+            validateArchitectureFromHardware(computer, template.getServerType(), serverName);
 
             return agent;
         } catch (Exception e) {
@@ -196,10 +244,6 @@ class NodeCallable implements Callable<Node> {
 
     /**
      * Remoting callable that executes uname -m on the agent.
-     * Uses ProcessBuilder to get actual hardware architecture rather than
-     * JVM's os.arch property, which reflects the JVM build (e.g., "amd64"
-     * instead of "x86_64") and can differ from the host on 32-bit JVMs
-     * or under QEMU emulation.
      */
     private static final class UnameCallable extends jenkins.security.MasterToSlaveCallable<String, Exception> {
         private static final long serialVersionUID = 1L;
@@ -210,12 +254,13 @@ class NodeCallable implements Callable<Node> {
                 ProcessBuilder pb = new ProcessBuilder("uname", "-m");
                 pb.redirectErrorStream(true);
                 Process proc = pb.start();
-                String output = new String(proc.getInputStream().readAllBytes()).trim();
+                String output = new String(proc.getInputStream().readAllBytes(),
+                        java.nio.charset.StandardCharsets.UTF_8).trim();
                 int exit = proc.waitFor();
                 if (exit == 0 && !output.isEmpty()) {
                     return output;
                 }
-            } catch (Exception e) {
+            } catch (IOException | InterruptedException e) {
                 // Fall back to JVM property if uname is unavailable (e.g., Windows agent)
             }
             return System.getProperty("os.arch", "unknown");

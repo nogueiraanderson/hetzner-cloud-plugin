@@ -214,6 +214,27 @@ public class Helper {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Parse the Hetzner error code from an API error response body.
+     * Expected format: {"error":{"code":"resource_unavailable","message":"..."}}
+     *
+     * @param errorBody raw response body string (may be null)
+     * @return the error code string, or null if unparseable
+     */
+    public static String parseHetznerErrorCode(String errorBody) {
+        if (Strings.isNullOrEmpty(errorBody)) {
+            return null;
+        }
+        java.util.regex.Matcher m = HETZNER_ERROR_CODE_RE.matcher(errorBody);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+
+    private static final Pattern HETZNER_ERROR_CODE_RE =
+            Pattern.compile("\"error\"\\s*:\\s*\\{[^}]*\"code\"\\s*:\\s*\"([^\"]+)\"");
+
     public static boolean isValidLabelValue(String value) {
         if (Strings.isNullOrEmpty(value)) {
             return false;

@@ -26,6 +26,7 @@ import retrofit2.Response;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -98,6 +99,47 @@ class HelperTest {
     void testAssertValidResponsePassesOnSuccess() {
         Response<String> response = Response.success("ok");
         assertEquals("ok", Helper.assertValidResponse(response, s -> s));
+    }
+
+    @Test
+    void testParseHetznerErrorCode_valid() {
+        String body = "{\"error\":{\"code\":\"resource_unavailable\",\"message\":\"no resources\"}}";
+        assertEquals("resource_unavailable", Helper.parseHetznerErrorCode(body));
+    }
+
+    @Test
+    void testParseHetznerErrorCode_null() {
+        assertNull(Helper.parseHetznerErrorCode(null));
+        assertNull(Helper.parseHetznerErrorCode(""));
+    }
+
+    @Test
+    void testParseHetznerErrorCode_malformed() {
+        assertNull(Helper.parseHetznerErrorCode("not json at all"));
+        assertNull(Helper.parseHetznerErrorCode("{\"other\":\"field\"}"));
+    }
+
+    @Test
+    void testHetznerProvisioningException_isResourceUnavailable() {
+        // 422 always means resource unavailable
+        HetznerProvisioningException ex422 = new HetznerProvisioningException(
+                "test", 422, null, "fsn1");
+        assertTrue(ex422.isResourceUnavailable());
+
+        // resource_unavailable error code
+        HetznerProvisioningException exCode = new HetznerProvisioningException(
+                "test", 409, "resource_unavailable", "fsn1");
+        assertTrue(exCode.isResourceUnavailable());
+
+        // placement_error
+        HetznerProvisioningException exPlacement = new HetznerProvisioningException(
+                "test", 409, "placement_error", "fsn1");
+        assertTrue(exPlacement.isResourceUnavailable());
+
+        // Normal error (auth) should NOT be retryable
+        HetznerProvisioningException exAuth = new HetznerProvisioningException(
+                "test", 401, "unauthorized", "fsn1");
+        assertFalse(exAuth.isResourceUnavailable());
     }
 
     @Test

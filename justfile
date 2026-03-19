@@ -1,7 +1,7 @@
 # Hetzner Cloud Plugin for Jenkins - Build, Test & Deploy
-# Patched version with retention bug fixes (Percona)
+# Patched version with retention bug fixes + DC failover (Percona)
 
-version := "103.percona.2"
+version := "103.percona.3"
 image := "maven:3.9-eclipse-temurin-17"
 container := "hetzner-build"
 m2_volume := "hetzner-m2-cache"
@@ -60,6 +60,75 @@ verify inst:
 # Verify plugin on all instances
 verify-all:
     ./scripts/verify.sh {{instances}}
+
+# Backup cloud config from a Jenkins instance
+backup inst:
+    ./scripts/backup.sh {{inst}}
+
+# Restore cloud config to a Jenkins instance from backup
+restore inst:
+    ./scripts/restore.sh {{inst}}
+
+# Show DC circuit breaker health via Script Console
+dc-health inst:
+    jenkins admin -i {{inst}} groovy -f scripts/dc-health-check.groovy
+
+# Verify DC failover by testing all 5 server types on an instance
+verify-failover inst:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    labels=("launcher-x64" "docker-x64-min" "docker-x64" "docker-aarch64-min" "docker-aarch64")
+    echo "=== DC Failover Verification on {{inst}} ==="
+    for label in "${labels[@]}"; do
+        echo "--- Testing label: $label ---"
+        groovy=$(cat <<GROOVY
+    import jenkins.model.Jenkins
+    def job = Jenkins.instance.getItem("verify-failover-${label}")
+    if (job) { job.delete() }
+    def xml = """<?xml version='1.0' encoding='UTF-8'?>
+    <flow-definition>
+      <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition">
+        <script>
+    node('${label}') {
+        sh 'uname -m'
+        sh 'echo VERIFY_FAILOVER_OK'
+    }
+        </script>
+        <sandbox>true</sandbox>
+      </definition>
+      <assignedNode>${label}</assignedNode>
+    </flow-definition>"""
+    def is = new ByteArrayInputStream(xml.getBytes("UTF-8"))
+    def newJob = Jenkins.instance.createProjectFromXML("verify-failover-${label}", is)
+    newJob.scheduleBuild2(0)
+    println "TRIGGERED|${label}"
+    GROOVY
+    )
+        jenkins admin -i {{inst}} groovy -e "$groovy" 2>&1 \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('message','FAIL'))" 2>/dev/null || echo "FAIL"
+    done
+    echo ""
+    echo "Monitor builds in Jenkins UI. Clean up with:"
+    echo "  for l in launcher-x64 docker-x64-min docker-x64 docker-aarch64-min docker-aarch64; do"
+    echo "    jenkins job -i {{inst}} delete verify-failover-\$l"
+    echo "  done"
+
+# Create a GitHub release and tag
+release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="v{{version}}"
+    hpi="hetzner-cloud-{{version}}.hpi"
+    if [[ ! -f "$hpi" ]]; then
+        echo "HPI not found. Run: just build"
+        exit 1
+    fi
+    git tag -s "$tag" -m "Release {{version}}"
+    git push origin "$tag"
+    gh release create "$tag" "$hpi" \
+        --title "{{version}}" \
+        --notes "Hetzner Cloud Plugin {{version}} (Percona patched)"
+    echo "Released $tag with $hpi"
 
 # Clean build artifacts and cache
 clean:

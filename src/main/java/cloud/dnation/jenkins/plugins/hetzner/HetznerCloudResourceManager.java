@@ -402,9 +402,29 @@ public class HetznerCloudResourceManager {
             log.debug("Calling API to create server resource : {}", createServerRequest);
             final Response<CreateServerResponse> createServerResponse = proxy().createServer(createServerRequest)
                     .execute();
+            if (!createServerResponse.isSuccessful()) {
+                String errorBody = null;
+                try {
+                    if (createServerResponse.errorBody() != null) {
+                        errorBody = createServerResponse.errorBody().string();
+                    }
+                } catch (IOException ignored) {
+                    // best effort
+                }
+                String errorCode = Helper.parseHetznerErrorCode(errorBody);
+                String location = agent.getTemplate().getLocation();
+                throw new HetznerProvisioningException(
+                        String.format("Hetzner API error creating server in %s: HTTP %d, code=%s, body=%s",
+                                location, createServerResponse.code(), errorCode, errorBody),
+                        createServerResponse.code(),
+                        errorCode,
+                        location);
+            }
             final HetznerServerInfo info = new HetznerServerInfo(sshKey);
             info.setServerDetail(assertValidResponse(createServerResponse, CreateServerResponse::getServer));
             return info;
+        } catch (HetznerProvisioningException e) {
+            throw e; // propagate typed exception without wrapping
         } catch (IOException e) {
             throw new IllegalStateException(e);
         } finally {
