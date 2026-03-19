@@ -1,10 +1,11 @@
-# Hetzner Cloud Plugin for Jenkins - Build & Test
+# Hetzner Cloud Plugin for Jenkins - Build, Test & Deploy
 # Patched version with retention bug fixes (Percona)
 
-version := "103.percona.1"
+version := "103.percona.2"
 image := "maven:3.9-eclipse-temurin-17"
 container := "hetzner-build"
 m2_volume := "hetzner-m2-cache"
+instances := "rel ps80 psmdb pxc pxb pg ps57 pmm cloud ps3"
 
 # Build plugin .hpi (skipping tests for speed)
 build:
@@ -35,6 +36,22 @@ test:
     docker cp "$(pwd)/." {{container}}:/plugin
     docker start -a {{container}}
     docker rm {{container}}
+
+# Deploy to a single instance (upload + pin + smart restart)
+deploy inst:
+    ./scripts/deploy.sh {{inst}} {{version}}
+
+# Deploy to all 10 instances
+deploy-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for inst in {{instances}}; do
+        ./scripts/deploy.sh "$inst" {{version}}
+    done
+
+# Check plugin version and executor status across all instances
+check:
+    ./scripts/check.sh "{{instances}}"
 
 # Clean build artifacts and cache
 clean:
