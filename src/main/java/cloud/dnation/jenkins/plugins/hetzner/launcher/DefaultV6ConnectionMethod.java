@@ -30,9 +30,13 @@ public class DefaultV6ConnectionMethod extends AbstractConnectionMethod {
     public String getAddress(ServerDetail server) {
         if (server.getPrivateNet() != null && !server.getPrivateNet().isEmpty()) {
             return server.getPrivateNet().get(0).getIp();
-        } else {
-            return server.getPublicNet().getIpv6().getIp();
         }
+        if (server.getPublicNet() == null || server.getPublicNet().getIpv6() == null) {
+            throw new IllegalStateException(String.format(
+                    "Server '%s' (id=%d) has no public IPv6 address and no private network",
+                    server.getName(), server.getId()));
+        }
+        return server.getPublicNet().getIpv6().getIp();
     }
 
     @Extension

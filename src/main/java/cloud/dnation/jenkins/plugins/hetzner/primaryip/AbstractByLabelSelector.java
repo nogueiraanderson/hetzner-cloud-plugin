@@ -40,7 +40,10 @@ public abstract class AbstractByLabelSelector extends AbstractPrimaryIpStrategy 
     @Override
     public void applyInternal(HetznerApi api, CreateServerRequest server) throws IOException {
         final PrimaryIpDetail pip = PagedResourceHelper.getAllPrimaryIps(api, selector).stream()
-                .filter(ip -> isIpUsable(ip, server)).findFirst().get();
+                .filter(ip -> isIpUsable(ip, server)).findFirst()
+                .orElseThrow(() -> new java.util.NoSuchElementException(
+                        String.format("No usable primary IP found for selector '%s' in location '%s'",
+                                selector, server.getLocation())));
         final PublicNetRequest net = new PublicNetRequest();
         net.setIpv4(pip.getId());
         net.setEnableIpv6(false);

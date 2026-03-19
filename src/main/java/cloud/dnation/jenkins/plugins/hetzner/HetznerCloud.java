@@ -63,7 +63,6 @@ public class HetznerCloud extends AbstractCloudImpl {
     private final String credentialsId;
     @Getter
     private List<HetznerServerTemplate> serverTemplates;
-    @Getter
     private transient HetznerCloudResourceManager resourceManager;
 
     @DataBoundConstructor
@@ -108,9 +107,16 @@ public class HetznerCloud extends AbstractCloudImpl {
         return this;
     }
 
+    public HetznerCloudResourceManager getResourceManager() {
+        if (resourceManager == null) {
+            resourceManager = HetznerCloudResourceManager.create(credentialsId);
+        }
+        return resourceManager;
+    }
+
     @SneakyThrows
     private int runningNodeCount() {
-        return Ints.checkedCast(resourceManager.fetchAllServers(name)
+        return Ints.checkedCast(getResourceManager().fetchAllServers(name)
                 .stream()
                 .filter(sd -> HetznerConstants.RUNNABLE_STATE_SET.contains(sd.getStatus()))
                 .count());
@@ -155,8 +161,8 @@ public class HetznerCloud extends AbstractCloudImpl {
                 }
             }
 
-        } catch (IOException | Descriptor.FormException e) {
-            log.error("Unable to provision node", e);
+        } catch (Exception e) {
+            log.error("Unable to provision node for cloud '{}', label '{}'", name, label, e);
         }
         return plannedNodes;
     }

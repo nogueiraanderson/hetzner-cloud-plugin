@@ -29,7 +29,7 @@ class TestPublicV6AddressOnly {
     @Test
     void testMissingV6Address() {
         final PublicV6AddressOnly addr = new PublicV6AddressOnly();
-        assertThrows(IllegalArgumentException.class, () ->
+        assertThrows(IllegalStateException.class, () ->
             addr.getAddress(new ServerDetail().publicNet(new PublicNetDetail().ipv4(new Ipv4Detail()))));
     }
 

@@ -42,45 +42,60 @@ class NodeCallable implements Callable<Node> {
         final HetznerServerInfo serverInfo = cloud.getResourceManager().createServer(agent);
         agent.setServerInstance(serverInfo);
         final String serverName = serverInfo.getServerDetail().getName();
-        boolean running = false;
-        final int bootDeadline = agent.getTemplate().getBootDeadline();
-        //wait for status == "running", but at most 15 minutes
-        final WaitStrategy waitStrategy = new WaitStrategy(bootDeadline, 45, 15);
-        while (!waitStrategy.isDeadLineOver()) {
-            waitStrategy.waitNext();
-            if (agent.isAlive()) {
-                log.info("Server '{}' is now running, waiting 10 seconds before proceeding", serverName);
-                Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
-                running = true;
-                break;
-            }
-        }
-        Preconditions.checkState(running, "Server '%s' didn't start after 15 minutes, giving up",
-                serverName);
-        Jenkins.get().addNode(agent);
-        computer = agent.toComputer();
-        int retry = 5;
-        boolean connected = false;
-        if (computer != null) {
-            while (--retry > 0) {
-                try {
-                    computer.connect(false).get();
-                    connected = true;
+        try {
+            boolean running = false;
+            final int bootDeadline = agent.getTemplate().getBootDeadline();
+            //wait for status == "running", but at most bootDeadline minutes
+            final WaitStrategy waitStrategy = new WaitStrategy(bootDeadline, 45, 15);
+            while (!waitStrategy.isDeadLineOver()) {
+                waitStrategy.waitNext();
+                if (agent.isAlive()) {
+                    log.info("Server '{}' is now running, waiting 10 seconds before proceeding", serverName);
+                    Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
+                    running = true;
                     break;
-                } catch (InterruptedException | ExecutionException e) {
-                    log.warn("Connection to '{}' has failed, remaining retries {}", computer.getDisplayName(),
-                            retry, e);
-                    TimeUnit.SECONDS.sleep(10);
                 }
             }
-            if (!connected) {
-                throw new IllegalStateException("Computer is not connected : " + computer.getName());
+            Preconditions.checkState(running,
+                    "Server '%s' (id=%s) didn't reach 'running' state within %s minute(s), giving up",
+                    serverName, serverInfo.getServerDetail().getId(), bootDeadline);
+            Jenkins.get().addNode(agent);
+            computer = agent.toComputer();
+            int retry = 5;
+            boolean connected = false;
+            if (computer != null) {
+                while (--retry > 0) {
+                    try {
+                        computer.connect(false).get();
+                        connected = true;
+                        break;
+                    } catch (InterruptedException | ExecutionException e) {
+                        log.warn("Connection to '{}' has failed, remaining retries {}",
+                                computer.getDisplayName(), retry, e);
+                        TimeUnit.SECONDS.sleep(10);
+                    }
+                }
+                if (!connected) {
+                    throw new IllegalStateException(
+                            "Failed to connect to '" + computer.getName() + "' after 5 retries");
+                }
+            } else {
+                throw new IllegalStateException(
+                        "No computer object in agent '" + agent.getDisplayName()
+                        + "' (server id=" + serverInfo.getServerDetail().getId() + ")");
             }
-        } else {
-            throw new IllegalStateException("No computer object in agent " + agent.getDisplayName());
+            return agent;
+        } catch (Exception e) {
+            log.error("Failed to bootstrap server '{}', attempting cleanup", serverName, e);
+            try {
+                cloud.getResourceManager().destroyServer(serverInfo.getServerDetail());
+                log.info("Destroyed leaked server '{}'", serverName);
+            } catch (Exception cleanupEx) {
+                log.error("Failed to destroy leaked server '{}' (id={}), manual cleanup required",
+                        serverName, serverInfo.getServerDetail().getId(), cleanupEx);
+            }
+            throw e;
         }
-
-        return agent;
     }
 
     private static final class WaitStrategy {
