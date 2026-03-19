@@ -128,9 +128,11 @@ public class Helper {
     }
 
     public static <T, E> E assertValidResponse(Response<T> response, Function<T, E> mapper) {
-        Preconditions.checkState(response.isSuccessful(), "Invalid API response : %s",
+        Preconditions.checkState(response.isSuccessful(), "Invalid API response: HTTP %s",
                 response.code());
-        return mapper.apply(response.body());
+        T body = response.body();
+        Preconditions.checkState(body != null, "API returned HTTP %s with null body", response.code());
+        return mapper.apply(body);
     }
 
     public static <T> void assertValidResponse(Response<T> response) {

@@ -14,7 +14,67 @@
  limitations under the License.
 -->
 
-# Hetzner Cloud Plugin for Jenkins
+# Hetzner Cloud Plugin for Jenkins (Percona patched fork)
+
+Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness fixes for idle node retention and cleanup.
+
+## Percona patches (v103.percona.1)
+
+Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
+
+**Bug 1 (critical): `ComputerRetentionWork` timer death.** `destroyServer()` wraps `IOException` in `IllegalStateException`. This unchecked exception propagates through `CloudRetentionStrategy.check()` into `ComputerRetentionWork.doRun()`, permanently killing the periodic retention timer. After that, no idle node on the instance ever gets cleaned up until Jenkins restarts. Confirmed empirically: CRW was dead for 28 hours on two production instances.
+
+**Bug 2: One-directional orphan cleanup.** `OrphanedNodesCleaner` only removes VMs without Jenkins nodes. It does not remove Jenkins nodes without VMs (ghost nodes), which accumulate after API failures or restarts.
+
+**Bug 3: Null transient fields after restart.** `cloud`, `template`, and `serverInstance` are `transient` fields. After Jenkins restart/deserialization they are null, causing NPE in `_terminate()` and `isAlive()`.
+
+### Changes
+
+| File | Fix |
+|------|-----|
+| `HetznerServerAgent._terminate()` | Catch all exceptions (protects CRW timer), null guards for transient fields, safe launcher cast |
+| `HetznerServerAgent.isAlive()` | Full null safety, catch-all returning false |
+| `HetznerServerAgent.getDisplayName()` | Complete null chain protection |
+| `HetznerCloudResourceManager.destroyServer()` | Log-and-return on IOException instead of throwing IllegalStateException |
+| `HetznerCloudResourceManager.refreshServerInfo()` | Throws IOException (checked) instead of IllegalStateException |
+| `OrphanedNodesCleaner` | Bi-directional cleanup (VMs without nodes AND nodes without VMs), per-item try-catch, catch-all in doRun() |
+| `Helper.assertValidResponse()` | Null body guard |
+| `HelperTest` | Tests for null body and error response handling |
+
+### Build
+
+Requires [just](https://github.com/casey/just) and Docker:
+
+```bash
+just build    # Build .hpi (skips tests, ~2min with cached deps)
+just test     # Build + run tests (~7min first run, cached after)
+```
+
+Maven dependencies are cached in a Docker volume (`hetzner-m2-cache`).
+
+### Deploy
+
+Drop-in replacement for upstream hetzner-cloud v103. Same artifact name, same dependencies.
+
+```bash
+# On Jenkins master (via SSH):
+cd /mnt/<instance>.cd.percona.com/plugins/
+
+# Back up original
+cp hetzner-cloud.hpi ~/hetzner-cloud-backup/hetzner-cloud-v103-original.hpi
+
+# Replace with patched version
+cp /path/to/hetzner-cloud-103.percona.1.hpi hetzner-cloud.hpi
+chown jenkins:jenkins hetzner-cloud.hpi
+
+# Pin to prevent update center from overwriting
+touch hetzner-cloud.hpi.pinned
+
+# Safe restart
+sudo systemctl restart jenkins
+```
+
+## Original README
 
 The Hetzner cloud plugin enables [Jenkins CI](https://www.jenkins.io/) to schedule builds on dynamically provisioned VMs in [Hetzner Cloud](https://www.hetzner.com/cloud).
 Servers in Hetzner cloud are provisioned as they are needed, based on labels assigned to them.

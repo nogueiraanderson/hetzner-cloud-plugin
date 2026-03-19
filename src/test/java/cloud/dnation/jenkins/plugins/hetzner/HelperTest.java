@@ -20,8 +20,13 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
+import okhttp3.MediaType;
+import okhttp3.ResponseBody;
+import retrofit2.Response;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HelperTest {
@@ -71,6 +76,28 @@ class HelperTest {
         assertTrue(Helper.isPossiblyLong("1"));
         assertFalse(Helper.isPossiblyLong("0"));
         assertFalse(Helper.isPossiblyLong("not-a-number"));
+    }
+
+    @Test
+    void testAssertValidResponseRejectsNullBody() {
+        // Simulate a successful HTTP response with null body
+        Response<String> response = Response.success(null);
+        assertThrows(IllegalStateException.class,
+                () -> Helper.assertValidResponse(response, s -> s));
+    }
+
+    @Test
+    void testAssertValidResponseRejectsFailedResponse() {
+        Response<String> response = Response.error(500,
+                ResponseBody.create("error", MediaType.get("text/plain")));
+        assertThrows(IllegalStateException.class,
+                () -> Helper.assertValidResponse(response, s -> s));
+    }
+
+    @Test
+    void testAssertValidResponsePassesOnSuccess() {
+        Response<String> response = Response.success("ok");
+        assertEquals("ok", Helper.assertValidResponse(response, s -> s));
     }
 
     @Test

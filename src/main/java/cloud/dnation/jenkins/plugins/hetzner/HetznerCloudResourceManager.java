@@ -207,7 +207,8 @@ public class HetznerCloudResourceManager {
                     Thread.sleep(5000); // Wait 5 seconds between checks
 
                     Response<GetServerByIdResponse> response = client.getServer(serverId).execute();
-                    if (response.isSuccessful() && response.body() != null) {
+                    if (response.isSuccessful() && response.body() != null
+                            && response.body().getServer() != null) {
                         ServerDetail currentState = response.body().getServer();
                         if ("off".equals(currentState.getStatus())) {
                             isShutdown = true;
@@ -232,8 +233,13 @@ public class HetznerCloudResourceManager {
             assertValidResponse(client.deleteServer(serverId).execute());
             log.info("Server with ID = {} successfully deleted", serverId);
         } catch (IOException e) {
-            log.error("Unable to destroy server with ID = {}", serverId, e);
-            throw new IllegalStateException(e);
+            // Log but do NOT throw. This method is called from _terminate()
+            // and OrphanedNodesCleaner, both running inside periodic timers.
+            // An unchecked exception here kills the timer thread permanently,
+            // disabling idle cleanup for ALL nodes on this Jenkins instance.
+            log.error("Unable to destroy server with ID = {} (name={}). "
+                    + "Server may become orphaned and will be retried by OrphanedNodesCleaner.",
+                    serverId, server.getName(), e);
         }
     }
 
@@ -274,15 +280,11 @@ public class HetznerCloudResourceManager {
      * @throws IllegalArgumentException if server didn't respond with code HTTP200
      * @throws IllegalStateException    if API call fails
      */
-    public HetznerServerInfo refreshServerInfo(HetznerServerInfo info) {
-        try {
-            final Response<GetServerByIdResponse> response = proxy().getServer(info.getServerDetail().getId())
-                    .execute();
-            info.setServerDetail(assertValidResponse(response, GetServerByIdResponse::getServer));
-            return info;
-        } catch (IOException e) {
-            throw new IllegalStateException(e);
-        }
+    public HetznerServerInfo refreshServerInfo(HetznerServerInfo info) throws IOException {
+        final Response<GetServerByIdResponse> response = proxy().getServer(info.getServerDetail().getId())
+                .execute();
+        info.setServerDetail(assertValidResponse(response, GetServerByIdResponse::getServer));
+        return info;
     }
 
     @SneakyThrows
