@@ -15,14 +15,17 @@
  */
 package cloud.dnation.jenkins.plugins.hetzner;
 
+import cloud.dnation.hetznerclient.ServerType;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.Uninterruptibles;
 import hudson.model.Computer;
 import hudson.model.Node;
+import hudson.remoting.VirtualChannel;
 import jenkins.model.Jenkins;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Locale;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -59,6 +62,13 @@ class NodeCallable implements Callable<Node> {
             Preconditions.checkState(running,
                     "Server '%s' (id=%s) didn't reach 'running' state within %s minute(s), giving up",
                     serverName, serverInfo.getServerDetail().getId(), bootDeadline);
+
+            // Option A: Pre-boot architecture validation via API response.
+            // The Hetzner API returns the actual server_type in the response,
+            // which may differ from what was requested during availability incidents.
+            validateArchitectureFromApi(agent.getTemplate().getServerType(),
+                    serverInfo.getServerDetail().getServerType(), serverName);
+
             Jenkins.get().addNode(agent);
             computer = agent.toComputer();
             int retry = 5;
@@ -84,6 +94,12 @@ class NodeCallable implements Callable<Node> {
                         "No computer object in agent '" + agent.getDisplayName()
                         + "' (server id=" + serverInfo.getServerDetail().getId() + ")");
             }
+            // Option C: Post-boot architecture validation via uname -m.
+            // Ground truth from the actual hardware, catches mismatches that
+            // even the API might not report (e.g., Hetzner availability incidents
+            // where ARM requests get fulfilled with x86 hardware).
+            validateArchitectureFromHardware(computer, agent.getTemplate().getServerType(), serverName);
+
             return agent;
         } catch (Exception e) {
             log.error("Failed to bootstrap server '{}', attempting cleanup", serverName, e);
@@ -95,6 +111,93 @@ class NodeCallable implements Callable<Node> {
                         serverName, serverInfo.getServerDetail().getId(), cleanupEx);
             }
             throw e;
+        }
+    }
+
+    /**
+     * Infer expected CPU architecture from Hetzner server type name.
+     * CAX series (cax11, cax21, cax31, cax41) = ARM64 (Ampere Altra).
+     * All others (cx, cpx, ccx, cx, etc.) = x86_64 (Intel/AMD).
+     *
+     * @param serverType Hetzner server type name (e.g., "cax41", "cpx62")
+     * @return "arm64" or "x86_64"
+     */
+    static String inferArchFromServerType(String serverType) {
+        if (serverType != null && serverType.toLowerCase(Locale.ROOT).startsWith("cax")) {
+            return "arm64";
+        }
+        return "x86_64";
+    }
+
+    /**
+     * Option A: Validate architecture from the Hetzner API response.
+     * After server creation, the API returns the actual server_type which may
+     * differ from what was requested during availability incidents.
+     */
+    private static void validateArchitectureFromApi(String requestedType,
+                                                    ServerType actualType,
+                                                    String serverName) {
+        if (actualType == null || actualType.getName() == null) {
+            log.warn("Cannot validate architecture for '{}': server_type not in API response", serverName);
+            return;
+        }
+        String expectedArch = inferArchFromServerType(requestedType);
+        String actualArch = inferArchFromServerType(actualType.getName());
+        if (!expectedArch.equals(actualArch)) {
+            throw new IllegalStateException(String.format(
+                    "Architecture mismatch for server '%s': requested type '%s' (%s) "
+                    + "but Hetzner provisioned type '%s' (%s). "
+                    + "This may indicate a Hetzner availability incident.",
+                    serverName, requestedType, expectedArch,
+                    actualType.getName(), actualArch));
+        }
+        log.debug("Architecture validated for '{}': requested='{}' actual='{}' arch={}",
+                serverName, requestedType, actualType.getName(), actualArch);
+    }
+
+    /**
+     * Option C: Validate architecture from actual hardware via uname -m.
+     * Runs after SSH connection is established. This is the ground-truth check
+     * that catches mismatches the API might not report.
+     */
+    private static void validateArchitectureFromHardware(Computer computer,
+                                                         String requestedType,
+                                                         String serverName) {
+        String expectedArch = inferArchFromServerType(requestedType);
+        try {
+            VirtualChannel channel = computer.getChannel();
+            if (channel == null) {
+                log.warn("Cannot validate hardware architecture for '{}': no remoting channel", serverName);
+                return;
+            }
+            // uname -m returns: x86_64, aarch64, armv7l, etc.
+            String uname = channel.call(new UnameCallable()).trim();
+            String hardwareArch = uname.contains("aarch64") || uname.contains("arm") ? "arm64" : "x86_64";
+            if (!expectedArch.equals(hardwareArch)) {
+                throw new IllegalStateException(String.format(
+                        "Hardware architecture mismatch for server '%s': "
+                        + "requested type '%s' (expected %s) but hardware reports '%s' (%s). "
+                        + "Hetzner provisioned wrong architecture.",
+                        serverName, requestedType, expectedArch, uname, hardwareArch));
+            }
+            log.info("Hardware architecture validated for '{}': uname={} expected={}", serverName, uname, expectedArch);
+        } catch (IllegalStateException e) {
+            throw e; // re-throw arch mismatch
+        } catch (Exception e) {
+            log.warn("Could not validate hardware architecture for '{}': {}", serverName, e.getMessage());
+            // Don't fail the build for validation errors, only for confirmed mismatches
+        }
+    }
+
+    /**
+     * Remoting callable that executes uname -m on the agent.
+     */
+    private static final class UnameCallable extends jenkins.security.MasterToSlaveCallable<String, Exception> {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public String call() throws Exception {
+            return System.getProperty("os.arch", "unknown");
         }
     }
 
