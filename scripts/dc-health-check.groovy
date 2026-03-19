@@ -1,10 +1,19 @@
 // DC Circuit Breaker Health Check
 // Run via Jenkins Script Console to inspect DC health state.
 // Usage: jenkins admin -i <inst> groovy -f scripts/dc-health-check.groovy
+//
+// Preferred: use the structured CLI instead:
+//   jenkins hetzner -i <inst> health
+//   jenkins hetzner fleet health
 
-import cloud.dnation.jenkins.plugins.hetzner.DcHealthTracker
+def cl = Jenkins.instance.pluginManager.getPlugin('hetzner-cloud')?.classLoader
+if (!cl) {
+    println "hetzner-cloud plugin not installed"
+    return
+}
 
-def breakers = DcHealthTracker.getAllBreakers()
+def tracker = cl.loadClass('cloud.dnation.jenkins.plugins.hetzner.DcHealthTracker')
+def breakers = tracker.getAllBreakers()
 
 if (breakers.isEmpty()) {
     println "No DC circuit breakers registered (no provisioning attempts yet)"

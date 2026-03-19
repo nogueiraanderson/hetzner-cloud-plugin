@@ -18,7 +18,50 @@
 
 Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness fixes for idle node retention and cleanup.
 
-## Percona patches (v103.percona.1)
+## Percona patches
+
+### v103.percona.3: DC circuit breaker failover
+
+Per-datacenter circuit breakers that automatically route provisioning away from
+unhealthy Hetzner locations (e.g., during DC maintenance or API outages).
+
+| Component | Purpose |
+|-----------|---------|
+| `DcCircuitBreaker` | Per-DC state machine (CLOSED / OPEN / HALF_OPEN) |
+| `DcHealthTracker` | Tracks consecutive failures per location |
+| `HetznerProvisioningException` | Typed exception for provisioning failures |
+
+Behavior:
+- Triggers on HTTP 422 / `resource_unavailable` from Hetzner API
+- 2-failure threshold trips the breaker for a DC
+- 5-minute auto-reset moves to HALF_OPEN, allowing a single probe request
+- Successful probe closes the breaker; failure re-opens it
+- All state is in-memory (resets on JVM restart)
+
+#### Observability via CLI
+
+The `jenkins hetzner` CLI provides structured access to DC health state:
+
+```bash
+# Single instance
+jenkins hetzner -i rel health           # DC breaker status
+jenkins hetzner -i rel status           # Overview (plugin + clouds + DCs + nodes)
+jenkins hetzner -i rel nodes            # Active hcloud-* workers
+jenkins hetzner -i rel servers          # Running VMs from Hetzner API
+jenkins hetzner -i rel templates        # Configured server templates
+jenkins hetzner -i rel version          # Plugin version + MD5
+jenkins hetzner -i rel orphans          # Orphan VMs + ghost nodes
+jenkins hetzner -i rel reset [dc]       # Reset circuit breaker
+jenkins hetzner -i rel trip <dc>        # Simulate DC failure
+
+# Fleet-wide
+jenkins hetzner fleet health            # DC health across all 10 instances
+jenkins hetzner fleet versions          # Plugin versions across all 10 instances
+```
+
+All commands support `--json`, `--llm`, `--raw` output modes.
+
+### v103.percona.1: Retention bug fixes
 
 Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
 
@@ -57,21 +100,23 @@ Maven dependencies are cached in a Docker volume (`hetzner-m2-cache`).
 Drop-in replacement for upstream hetzner-cloud v103. Same artifact name, same dependencies.
 
 ```bash
-# On Jenkins master (via SSH):
-cd /mnt/<instance>.cd.percona.com/plugins/
+# Deploy to a single instance
+just deploy rel
 
-# Back up original
-cp hetzner-cloud.hpi ~/hetzner-cloud-backup/hetzner-cloud-v103-original.hpi
+# Deploy to all 10 instances
+just deploy-all
 
-# Replace with patched version
-cp /path/to/hetzner-cloud-103.percona.1.hpi hetzner-cloud.hpi
-chown jenkins:jenkins hetzner-cloud.hpi
+# Verify deployment
+just check
+jenkins hetzner fleet versions
+```
 
-# Pin to prevent update center from overwriting
-touch hetzner-cloud.hpi.pinned
+Post-deploy validation:
 
-# Safe restart
-sudo systemctl restart jenkins
+```bash
+jenkins hetzner -i <inst> version      # Confirm version + MD5
+jenkins hetzner -i <inst> templates    # Confirm 15 templates present
+jenkins hetzner -i <inst> health       # Confirm breakers CLOSED
 ```
 
 ## Original README
