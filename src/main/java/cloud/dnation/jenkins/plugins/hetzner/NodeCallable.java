@@ -119,6 +119,11 @@ class NodeCallable implements Callable<Node> {
      * CAX series (cax11, cax21, cax31, cax41) = ARM64 (Ampere Altra).
      * All others (cx, cpx, ccx, cx, etc.) = x86_64 (Intel/AMD).
      *
+     * Limitation: relies on Hetzner naming convention. If Hetzner introduces
+     * new ARM server type prefixes (e.g., "aax*"), this method will
+     * incorrectly classify them as x86_64. The post-boot uname check
+     * (Option C) serves as the safety net for this case.
+     *
      * @param serverType Hetzner server type name (e.g., "cax41", "cpx62")
      * @return "arm64" or "x86_64"
      */
@@ -191,12 +196,28 @@ class NodeCallable implements Callable<Node> {
 
     /**
      * Remoting callable that executes uname -m on the agent.
+     * Uses ProcessBuilder to get actual hardware architecture rather than
+     * JVM's os.arch property, which reflects the JVM build (e.g., "amd64"
+     * instead of "x86_64") and can differ from the host on 32-bit JVMs
+     * or under QEMU emulation.
      */
     private static final class UnameCallable extends jenkins.security.MasterToSlaveCallable<String, Exception> {
         private static final long serialVersionUID = 1L;
 
         @Override
         public String call() throws Exception {
+            try {
+                ProcessBuilder pb = new ProcessBuilder("uname", "-m");
+                pb.redirectErrorStream(true);
+                Process proc = pb.start();
+                String output = new String(proc.getInputStream().readAllBytes()).trim();
+                int exit = proc.waitFor();
+                if (exit == 0 && !output.isEmpty()) {
+                    return output;
+                }
+            } catch (Exception e) {
+                // Fall back to JVM property if uname is unavailable (e.g., Windows agent)
+            }
             return System.getProperty("os.arch", "unknown");
         }
     }

@@ -23,6 +23,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.jenkinsci.Symbol;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -70,15 +73,20 @@ public class OrphanedNodesCleaner extends PeriodicWork {
                     .map(ServerDetail::getName)
                     .collect(Collectors.toSet());
 
-            // Direction 1: VMs without Jenkins nodes (orphan VMs) -- destroy them
+            // Direction 1: VMs without Jenkins nodes (orphan VMs) -- destroy them.
+            // Grace period: skip VMs younger than 15 minutes to avoid destroying
+            // servers that are actively being provisioned by NodeCallable (which
+            // creates the server before calling Jenkins.get().addNode()).
             allInstances.stream()
                     .filter(server -> !jenkinsNodeNames.contains(server.getName()))
+                    .filter(server -> isOlderThan(server, Duration.ofMinutes(15)))
                     .forEach(serverDetail -> terminateOrphanedServer(serverDetail, cloud));
 
-            // Direction 2: Jenkins nodes without VMs (ghost nodes) -- remove them
+            // Direction 2: Jenkins nodes without VMs (ghost nodes) -- remove them.
+            // Match by node name prefix (hcloud-) rather than transient cloud field,
+            // which is null after deserialization (exactly the scenario ghost nodes
+            // arise from). All Hetzner nodes use the "hcloud-" naming convention.
             hetznerAgents.stream()
-                    .filter(agent -> agent.getCloud() != null
-                            && agent.getCloud().name.equals(cloud.name))
                     .filter(agent -> !hetznerVmNames.contains(agent.getNodeName()))
                     .forEach(agent -> removeGhostNode(agent));
 
@@ -97,6 +105,24 @@ public class OrphanedNodesCleaner extends PeriodicWork {
         } catch (Exception e) {
             log.error("Failed to terminate orphaned server {} (id={}) from cloud '{}': {}",
                     serverDetail.getName(), serverDetail.getId(), cloud.name, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Check if a server was created more than the given duration ago.
+     * Returns true if the creation time cannot be parsed (fail-safe: clean up).
+     */
+    private static boolean isOlderThan(ServerDetail server, Duration minAge) {
+        try {
+            String created = server.getCreated();
+            if (created == null || created.isEmpty()) {
+                return true; // no timestamp means we can't tell; assume old
+            }
+            OffsetDateTime createdAt = OffsetDateTime.parse(created);
+            return Duration.between(createdAt, OffsetDateTime.now()).compareTo(minAge) > 0;
+        } catch (DateTimeParseException e) {
+            log.warn("Could not parse creation time for server '{}': {}", server.getName(), e.getMessage());
+            return true; // fail-safe: treat unparseable as old
         }
     }
 
