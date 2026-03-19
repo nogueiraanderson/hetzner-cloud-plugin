@@ -53,6 +53,14 @@ deploy-all:
 check:
     ./scripts/check.sh "{{instances}}"
 
+# Verify plugin on a single instance (create temp job, run, check, delete)
+verify inst:
+    ./scripts/verify.sh {{inst}}
+
+# Verify plugin on all instances
+verify-all:
+    ./scripts/verify.sh {{instances}}
+
 # Clean build artifacts and cache
 clean:
     rm -f hetzner-cloud-*.hpi

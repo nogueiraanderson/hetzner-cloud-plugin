@@ -1,0 +1,35 @@
+<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition>
+  <description>Temporary job to verify hetzner-cloud plugin</description>
+  <keepDependencies>false</keepDependencies>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition">
+    <script>
+pipeline {
+    agent { label 'launcher-x64' }
+    options { timeout(time: 5, unit: 'MINUTES') }
+    stages {
+        stage('Verify Plugin') {
+            steps {
+                script {
+                    def plugin = Jenkins.instance.pluginManager.plugins.find { it.shortName == 'hetzner-cloud' }
+                    echo "PLUGIN_VERSION=${plugin?.version}"
+                    def cleaner = Jenkins.instance.getExtensionList(hudson.model.PeriodicWork.class).find {
+                        it.class.simpleName == 'OrphanedNodesCleaner'
+                    }
+                    echo "ORPHAN_CLEANER=${cleaner ? 'LOADED' : 'MISSING'}"
+                    def clouds = Jenkins.instance.clouds.findAll { it.class.simpleName == 'HetznerCloud' }
+                    echo "HETZNER_CLOUDS=${clouds.size()}"
+                    clouds.each { c -&gt;
+                        echo "  CLOUD=${c.name} TEMPLATES=${c.getServerTemplates().size()}"
+                    }
+                }
+                sh 'echo "uname: $(uname -m)" &amp;&amp; echo "VERIFY_OK"'
+            }
+        }
+    }
+}
+    </script>
+    <sandbox>false</sandbox>
+  </definition>
+  <disabled>false</disabled>
+</flow-definition>
