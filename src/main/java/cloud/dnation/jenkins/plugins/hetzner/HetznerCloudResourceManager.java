@@ -232,11 +232,14 @@ public class HetznerCloudResourceManager {
             // Delete the server
             assertValidResponse(client.deleteServer(serverId).execute());
             log.info("Server with ID = {} successfully deleted", serverId);
-        } catch (IOException e) {
-            // Log but do NOT throw. This method is called from _terminate()
-            // and OrphanedNodesCleaner, both running inside periodic timers.
-            // An unchecked exception here kills the timer thread permanently,
-            // disabling idle cleanup for ALL nodes on this Jenkins instance.
+        } catch (Exception e) {
+            // Catch ALL exceptions (IOException, IllegalStateException from
+            // assertValidResponse on HTTP 429/412, and any other RuntimeException).
+            // This method is called from _terminate() and OrphanedNodesCleaner,
+            // both running inside periodic timers. An unchecked exception here
+            // kills the timer thread permanently, disabling idle cleanup for
+            // ALL nodes on this Jenkins instance.
+            // The OrphanedNodesCleaner will retry deletion on its next hourly run.
             log.error("Unable to destroy server with ID = {} (name={}). "
                     + "Server may become orphaned and will be retried by OrphanedNodesCleaner.",
                     serverId, server.getName(), e);
