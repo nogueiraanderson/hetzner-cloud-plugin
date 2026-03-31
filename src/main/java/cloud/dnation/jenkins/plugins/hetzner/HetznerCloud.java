@@ -132,8 +132,11 @@ public class HetznerCloud extends AbstractCloudImpl {
                     log.warn("Jenkins is going down, no new nodes will be provisioned");
                     break;
                 }
-                if (HetznerApiClient.forCredentials(credentialsId).isRateLimited()) {
-                    log.warn("Hetzner API token rate-limited, suppressing provisioning for cloud '{}'", name);
+                HetznerApiClient apiClient = HetznerApiClient.forCredentials(credentialsId);
+                if (apiClient.isRateLimited()) {
+                    log.warn("Hetzner API token rate-limited, suppressing provisioning for cloud '{}' "
+                            + "(remaining={}, resets in {}s)",
+                            name, apiClient.getRemaining(), apiClient.timeUntilReset().toSeconds());
                     break;
                 }
                 int running = runningNodeCount();

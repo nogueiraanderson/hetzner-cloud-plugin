@@ -52,6 +52,7 @@ class HetznerApiClient {
     private volatile HetznerApi api;
 
     // Rate-limit tracking (token-scoped)
+    private final AtomicInteger limit = new AtomicInteger(3600);
     private final AtomicInteger remaining = new AtomicInteger(Integer.MAX_VALUE);
     private final AtomicReference<Instant> resetAt = new AtomicReference<>(Instant.EPOCH);
     private volatile boolean rateLimited = false;
@@ -91,7 +92,7 @@ class HetznerApiClient {
                     OkHttpClient httpClient = new OkHttpClient.Builder()
                             .connectionPool(CONNECTION_POOL)
                             .addInterceptor(new AuthInterceptor(credentialsId))
-                            .addInterceptor(new RetryInterceptor())
+                            .addInterceptor(new RetryInterceptor(credentialsId))
                             .addInterceptor(new RateLimitInterceptor(this))
                             .addInterceptor(loggingInterceptor)
                             .build();
@@ -128,12 +129,17 @@ class HetznerApiClient {
         return d.isNegative() ? Duration.ZERO : d;
     }
 
-    void updateRateLimitState(int httpStatus, int remaining, long resetEpoch) {
+    void updateRateLimitState(int httpStatus, int limit, int remaining, long resetEpoch) {
+        if (limit > 0) {
+            this.limit.set(limit);
+        }
         if (remaining >= 0) {
             int prev = this.remaining.getAndSet(remaining);
-            // Log when quota drops below 10% of limit (360 of 3600)
-            if (remaining <= 360 && remaining < prev) {
-                log.warn("Hetzner API quota low: {}/3600 remaining (credentialsId={})", remaining, credentialsId);
+            int currentLimit = this.limit.get();
+            int threshold = currentLimit / 10; // 10% of limit
+            if (remaining <= threshold && remaining < prev) {
+                log.warn("Hetzner API quota low: {}/{} remaining (credentialsId={})",
+                        remaining, currentLimit, credentialsId);
             }
         }
         if (resetEpoch > 0) {

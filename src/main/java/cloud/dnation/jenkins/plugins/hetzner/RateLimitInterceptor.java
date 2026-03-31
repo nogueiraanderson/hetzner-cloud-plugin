@@ -29,10 +29,11 @@ class RateLimitInterceptor implements Interceptor {
     public Response intercept(Chain chain) throws IOException {
         Response response = chain.proceed(chain.request());
 
+        int limit = parseIntHeader(response, "RateLimit-Limit", -1);
         int remaining = parseIntHeader(response, "RateLimit-Remaining", -1);
         long resetEpoch = parseLongHeader(response, "RateLimit-Reset", 0);
 
-        apiClient.updateRateLimitState(response.code(), remaining, resetEpoch);
+        apiClient.updateRateLimitState(response.code(), limit, remaining, resetEpoch);
 
         if (response.code() == 429) {
             long retryAfter = parseLongHeader(response, "Retry-After", 0);

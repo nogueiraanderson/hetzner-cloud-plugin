@@ -160,7 +160,8 @@ public class HetznerCloudResourceManager {
         HetznerApiClient client = apiClient();
         if (client.isRateLimited()) {
             long resetSeconds = client.timeUntilReset().toSeconds();
-            log.debug("Rate-limit guard blocked {} (resets in {}s)", context, resetSeconds);
+            log.info("Rate-limit guard blocked {} (remaining={}, resets in {}s)",
+                    context, client.getRemaining(), resetSeconds);
             throw new HetznerProvisioningException(
                     String.format("Token rate-limited, skipping %s (resets in %ds)",
                             context, resetSeconds),
@@ -239,7 +240,7 @@ public class HetznerCloudResourceManager {
             return cachedId;
         }
 
-        log.info("Trying to find single resource for label expression '{}'", labelExpression);
+        log.debug("Label expression cache miss, querying API for '{}'", labelExpression);
         final Response<R> response = searchFunction.apply(labelExpression).execute();
         assertValidResponse(response);
         List<I> items = getPayload(response, getItemsFunction);
@@ -518,6 +519,10 @@ public class HetznerCloudResourceManager {
             }
             final HetznerServerInfo info = new HetznerServerInfo(sshKey);
             info.setServerDetail(assertValidResponse(createServerResponse, CreateServerResponse::getServer));
+            log.info("Server created: name={}, id={}, dc={}, type={} (remaining={})",
+                    info.getServerDetail().getName(), info.getServerDetail().getId(),
+                    agent.getTemplate().getLocation(), agent.getTemplate().getServerType(),
+                    apiClient().getRemaining());
             // Invalidate server list cache so runningNodeCount() sees the new server
             String cloudName = agent.getTemplate().getCloud().name;
             SERVER_LIST_CACHE.invalidate(cloudName);

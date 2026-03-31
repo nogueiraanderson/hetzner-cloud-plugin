@@ -35,6 +35,12 @@ class RetryInterceptor implements Interceptor {
     private static final long CAP_MS = 30_000;
     private static final Set<Integer> RETRYABLE_CODES = Set.of(429, 502, 504);
 
+    private final String credentialsId;
+
+    RetryInterceptor(String credentialsId) {
+        this.credentialsId = credentialsId;
+    }
+
     @Override
     public Response intercept(Chain chain) throws IOException {
         Request request = chain.request();
@@ -56,10 +62,10 @@ class RetryInterceptor implements Interceptor {
 
                 // Retryable status code -- calculate backoff
                 long delay = calculateDelay(attempt, response);
-                log.warn("HTTP {} on {} {}, retrying in {}ms (attempt {}/{})",
+                log.warn("HTTP {} on {} {} [{}], retrying in {}ms (attempt {}/{})",
                         response.code(),
                         request.method(), request.url().encodedPath(),
-                        delay, attempt + 1, MAX_RETRIES);
+                        credentialsId, delay, attempt + 1, MAX_RETRIES);
                 sleep(delay);
 
             } catch (SocketTimeoutException e) {
@@ -68,9 +74,9 @@ class RetryInterceptor implements Interceptor {
                     break;
                 }
                 long delay = calculateDelay(attempt, null);
-                log.warn("Timeout on {} {}, retrying in {}ms (attempt {}/{}): {}",
+                log.warn("Timeout on {} {} [{}], retrying in {}ms (attempt {}/{}): {}",
                         request.method(), request.url().encodedPath(),
-                        delay, attempt + 1, MAX_RETRIES, e.getMessage());
+                        credentialsId, delay, attempt + 1, MAX_RETRIES, e.getMessage());
                 sleep(delay);
             } catch (InterruptedIOException e) {
                 // Thread interrupted (not a timeout) -- do not retry
@@ -80,8 +86,8 @@ class RetryInterceptor implements Interceptor {
 
         // Exhausted retries on network timeout
         if (lastException != null) {
-            log.error("Exhausted {} retries on {} {} due to timeouts",
-                    MAX_RETRIES, request.method(), request.url().encodedPath());
+            log.error("Exhausted {} retries on {} {} [{}] due to timeouts",
+                    MAX_RETRIES, request.method(), request.url().encodedPath(), credentialsId);
             throw lastException;
         }
 

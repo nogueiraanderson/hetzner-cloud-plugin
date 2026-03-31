@@ -77,7 +77,11 @@ class NodeCallable implements Callable<Node> {
                 if (e.isRateLimited()) {
                     // Rate limit is token-scoped, not DC-scoped. All DCs share
                     // the same token; retrying another DC just wastes quota.
-                    log.warn("Token rate-limited during provisioning in DC {}, aborting failover", location);
+                    HetznerApiClient client = HetznerApiClient.forCredentials(cloud.getCredentialsId());
+                    log.warn("Token rate-limited during provisioning of '{}' in DC {} "
+                            + "(remaining={}, resets in {}s), aborting failover",
+                            agent.getNodeName(), location,
+                            client.getRemaining(), client.timeUntilReset().toSeconds());
                     throw e;
                 }
                 DcHealthTracker.recordFailure(location);
@@ -111,8 +115,10 @@ class NodeCallable implements Callable<Node> {
             final WaitStrategy waitStrategy = new WaitStrategy(bootDeadline, 45, 15);
             while (!waitStrategy.isDeadLineOver()) {
                 waitStrategy.waitNext();
-                if (HetznerApiClient.forCredentials(cloud.getCredentialsId()).isRateLimited()) {
-                    log.debug("Rate-limited, skipping boot status poll for '{}'", serverName);
+                HetznerApiClient bootClient = HetznerApiClient.forCredentials(cloud.getCredentialsId());
+                if (bootClient.isRateLimited()) {
+                    log.debug("Rate-limited, skipping boot status poll for '{}' (resets in {}s)",
+                            serverName, bootClient.timeUntilReset().toSeconds());
                     continue;
                 }
                 if (agent.isAlive()) {
