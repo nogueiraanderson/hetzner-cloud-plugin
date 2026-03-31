@@ -91,6 +91,7 @@ class HetznerApiClient {
                     OkHttpClient httpClient = new OkHttpClient.Builder()
                             .connectionPool(CONNECTION_POOL)
                             .addInterceptor(new AuthInterceptor(credentialsId))
+                            .addInterceptor(new RetryInterceptor())
                             .addInterceptor(new RateLimitInterceptor(this))
                             .addInterceptor(loggingInterceptor)
                             .build();
