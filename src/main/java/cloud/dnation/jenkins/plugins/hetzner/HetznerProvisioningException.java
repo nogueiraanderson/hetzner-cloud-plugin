@@ -34,6 +34,15 @@ class HetznerProvisioningException extends RuntimeException {
      * Hetzner returns HTTP 422 with error code "resource_unavailable" when a DC cannot
      * fulfill the server type request. Also matches "placement_error" and "server_limit_exceeded".
      */
+    /**
+     * Whether this error is a rate-limit (HTTP 429) response.
+     * Rate-limiting is token-scoped, not DC-scoped: all DCs share the same
+     * API token, so retrying in another DC will not help.
+     */
+    boolean isRateLimited() {
+        return httpStatus == 429 || "rate_limit_exceeded".equals(hetznerErrorCode);
+    }
+
     boolean isResourceUnavailable() {
         if (httpStatus == 422) {
             return true;

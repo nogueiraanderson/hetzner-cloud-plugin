@@ -128,8 +128,23 @@ public class Helper {
     }
 
     public static <T, E> E assertValidResponse(Response<T> response, Function<T, E> mapper) {
-        Preconditions.checkState(response.isSuccessful(), "Invalid API response: HTTP %s",
-                response.code());
+        if (!response.isSuccessful()) {
+            // Throw typed exception for 429 so callers can distinguish rate-limiting
+            if (response.code() == 429) {
+                String errorBody = null;
+                try {
+                    if (response.errorBody() != null) {
+                        errorBody = response.errorBody().string();
+                    }
+                } catch (java.io.IOException ignored) { }
+                String errorCode = parseHetznerErrorCode(errorBody);
+                throw new HetznerProvisioningException(
+                        String.format("Hetzner API rate limited: HTTP 429, code=%s, body=%s",
+                                errorCode, errorBody),
+                        429, errorCode != null ? errorCode : "rate_limit_exceeded", "api");
+            }
+            Preconditions.checkState(false, "Invalid API response: HTTP %s", response.code());
+        }
         T body = response.body();
         Preconditions.checkState(body != null, "API returned HTTP %s with null body", response.code());
         return mapper.apply(body);

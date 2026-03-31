@@ -74,6 +74,12 @@ class NodeCallable implements Callable<Node> {
                 return result;
             } catch (HetznerProvisioningException e) {
                 lastException = e;
+                if (e.isRateLimited()) {
+                    // Rate limit is token-scoped, not DC-scoped. All DCs share
+                    // the same token; retrying another DC just wastes quota.
+                    log.warn("Token rate-limited during provisioning in DC {}, aborting failover", location);
+                    throw e;
+                }
                 DcHealthTracker.recordFailure(location);
                 if (e.isResourceUnavailable() && i < rankedTemplates.size() - 1) {
                     log.warn("DC {} unavailable ({}), trying next DC ({}/{})",

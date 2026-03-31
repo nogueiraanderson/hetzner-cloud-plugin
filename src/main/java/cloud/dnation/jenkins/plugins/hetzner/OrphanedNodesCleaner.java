@@ -61,6 +61,10 @@ public class OrphanedNodesCleaner extends PeriodicWork {
     }
 
     private static void cleanCloud(HetznerCloud cloud) {
+        if (HetznerApiClient.forCredentials(cloud.getCredentialsId()).isRateLimited()) {
+            log.warn("Token rate-limited for cloud '{}', skipping orphan cleanup this cycle", cloud.name);
+            return;
+        }
         try {
             final List<ServerDetail> allInstances = cloud.getResourceManager()
                     .fetchAllServers(cloud.name);
