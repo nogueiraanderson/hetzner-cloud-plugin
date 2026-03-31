@@ -43,6 +43,15 @@ class HetznerProvisioningException extends RuntimeException {
         return httpStatus == 429 || "rate_limit_exceeded".equals(hetznerErrorCode);
     }
 
+    /**
+     * Whether this error indicates a persistent template configuration problem.
+     * These errors won't resolve with DC failover or retries; they require
+     * a config change (e.g., updating a deprecated image ID).
+     */
+    boolean isConfigError() {
+        return "invalid_input".equals(hetznerErrorCode);
+    }
+
     boolean isResourceUnavailable() {
         if (httpStatus == 422) {
             return true;

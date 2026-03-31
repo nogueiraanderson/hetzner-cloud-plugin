@@ -71,6 +71,7 @@ class NodeCallable implements Callable<Node> {
             try {
                 Node result = doProvision(template);
                 DcHealthTracker.recordSuccess(location);
+                TemplateErrorTracker.recordSuccess(template.getName());
                 return result;
             } catch (HetznerProvisioningException e) {
                 lastException = e;
@@ -82,6 +83,17 @@ class NodeCallable implements Callable<Node> {
                             + "(remaining={}, resets in {}s), aborting failover",
                             agent.getNodeName(), location,
                             client.getRemaining(), client.timeUntilReset().toSeconds());
+                    throw e;
+                }
+                if (e.isConfigError()) {
+                    // Config errors are template-scoped, not DC-scoped.
+                    // Trying another DC with the same bad image/config won't help.
+                    TemplateErrorTracker.recordError(template.getName(), e.getMessage());
+                    log.warn("Template '{}' config error in DC {}: {} "
+                            + "(code={}, image={}). DC failover skipped; "
+                            + "check Hetzner changelog for image deprecation.",
+                            template.getName(), location, e.getMessage(),
+                            e.getHetznerErrorCode(), template.getImage());
                     throw e;
                 }
                 DcHealthTracker.recordFailure(location);

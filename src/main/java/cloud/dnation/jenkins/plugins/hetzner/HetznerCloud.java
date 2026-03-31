@@ -144,6 +144,12 @@ public class HetznerCloud extends AbstractCloudImpl {
                 int available = instanceCap - running;
                 final List<HetznerServerTemplate> rankedTemplates = rankTemplatesByHealth(matchingTemplates);
                 final HetznerServerTemplate template = rankedTemplates.get(0);
+                if (TemplateErrorTracker.isSuppressed(template.getName())) {
+                    log.warn("Template '{}' suppressed due to recurring config errors "
+                            + "(image={}). Provisioning skipped; fix template config "
+                            + "or check Hetzner changelog.", template.getName(), template.getImage());
+                    break;
+                }
                 log.info("Creating new agent with {} executors, have {} running VMs", template.getNumExecutors(), running);
                 if (available <= 0) {
                     log.warn("Cloud capacity reached ({}). Has {} VMs running, but want {} more executors",
