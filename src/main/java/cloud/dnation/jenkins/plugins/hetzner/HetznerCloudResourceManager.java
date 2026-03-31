@@ -113,15 +113,36 @@ public class HetznerCloudResourceManager {
 
     // SSH key: credentialsId -> SshKeyDetail. Keys are immutable after creation.
     private static final Cache<String, SshKeyDetail> SSH_KEY_CACHE =
-            CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.MINUTES).maximumSize(50).build();
+            CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.MINUTES).maximumSize(50)
+                    .recordStats().build();
 
     // Label expression -> resource ID. Images/networks/firewalls/placement groups rarely change.
     private static final Cache<String, Long> LABEL_ID_CACHE =
-            CacheBuilder.newBuilder().expireAfterWrite(15, TimeUnit.MINUTES).maximumSize(200).build();
+            CacheBuilder.newBuilder().expireAfterWrite(15, TimeUnit.MINUTES).maximumSize(200)
+                    .recordStats().build();
 
     // Server list: cloudName -> List<ServerDetail>. Short TTL; invalidated on create/destroy.
     private static final Cache<String, List<ServerDetail>> SERVER_LIST_CACHE =
-            CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.SECONDS).maximumSize(20).build();
+            CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.SECONDS).maximumSize(20)
+                    .recordStats().build();
+
+    /**
+     * Return cache statistics for operational observability.
+     * Callable from Jenkins Script Console via:
+     *   println cloud.dnation.jenkins.plugins.hetzner.HetznerCloudResourceManager.getCacheStats()
+     */
+    public static String getCacheStats() {
+        return String.format(
+                "SSH_KEY_CACHE:  size=%d hits=%d misses=%d hitRate=%.1f%%\n"
+              + "LABEL_ID_CACHE: size=%d hits=%d misses=%d hitRate=%.1f%%\n"
+              + "SERVER_LIST:    size=%d hits=%d misses=%d hitRate=%.1f%%",
+                SSH_KEY_CACHE.size(), SSH_KEY_CACHE.stats().hitCount(),
+                SSH_KEY_CACHE.stats().missCount(), SSH_KEY_CACHE.stats().hitRate() * 100,
+                LABEL_ID_CACHE.size(), LABEL_ID_CACHE.stats().hitCount(),
+                LABEL_ID_CACHE.stats().missCount(), LABEL_ID_CACHE.stats().hitRate() * 100,
+                SERVER_LIST_CACHE.size(), SERVER_LIST_CACHE.stats().hitCount(),
+                SERVER_LIST_CACHE.stats().missCount(), SERVER_LIST_CACHE.stats().hitRate() * 100);
+    }
 
     private HetznerApiClient apiClient() {
         return HetznerApiClient.forCredentials(credentialsId);

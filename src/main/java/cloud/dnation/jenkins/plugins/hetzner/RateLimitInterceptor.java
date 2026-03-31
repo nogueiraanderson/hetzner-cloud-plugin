@@ -40,6 +40,10 @@ class RateLimitInterceptor implements Interceptor {
                     chain.request().method(), chain.request().url().encodedPath(),
                     remaining, retryAfter > 0 ? retryAfter : "default-60");
             apiClient.recordRateLimit(retryAfter > 0 ? retryAfter : 60);
+        } else if (response.code() == 401) {
+            log.warn("HTTP 401 on {} {} -- token may have been rotated, invalidating client",
+                    chain.request().method(), chain.request().url().encodedPath());
+            apiClient.invalidate();
         }
 
         return response;

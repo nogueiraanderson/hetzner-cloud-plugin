@@ -15,7 +15,6 @@
  */
 package cloud.dnation.jenkins.plugins.hetzner;
 
-import cloud.dnation.hetznerclient.ClientFactory;
 import cloud.dnation.hetznerclient.GetDatacentersResponse;
 import cloud.dnation.hetznerclient.GetFirewallByIdResponse;
 import cloud.dnation.hetznerclient.GetFirewallsBySelectorResponse;
@@ -63,7 +62,7 @@ public class ConfigurationValidator {
      * @return ValidationResult
      */
     private static ValidationResult validateWithClient(ValidationAction action, String credentialsId) {
-        final HetznerApi client = ClientFactory.create(JenkinsSecretTokenProvider.forCredentialsId(credentialsId));
+        final HetznerApi client = HetznerApiClient.forCredentials(credentialsId).proxy();
         try {
             return action.validate(client);
         } catch (Exception e) {

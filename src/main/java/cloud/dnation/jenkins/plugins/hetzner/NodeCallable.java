@@ -111,6 +111,10 @@ class NodeCallable implements Callable<Node> {
             final WaitStrategy waitStrategy = new WaitStrategy(bootDeadline, 45, 15);
             while (!waitStrategy.isDeadLineOver()) {
                 waitStrategy.waitNext();
+                if (HetznerApiClient.forCredentials(cloud.getCredentialsId()).isRateLimited()) {
+                    log.debug("Rate-limited, skipping boot status poll for '{}'", serverName);
+                    continue;
+                }
                 if (agent.isAlive()) {
                     log.info("Server '{}' is now running, waiting 10 seconds before proceeding", serverName);
                     Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);

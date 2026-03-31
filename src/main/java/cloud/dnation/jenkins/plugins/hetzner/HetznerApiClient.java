@@ -82,15 +82,15 @@ class HetznerApiClient {
         if (api == null) {
             synchronized (this) {
                 if (api == null) {
-                    String token = JenkinsSecretTokenProvider.forCredentialsId(credentialsId).get();
-
+                    String logLevel = System.getProperty(
+                            "cloud.dnation.hetzner.http.loglevel", "BASIC");
                     HttpLoggingInterceptor loggingInterceptor = new HttpLoggingInterceptor(log::debug);
                     loggingInterceptor.redactHeader("Authorization");
-                    loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
+                    loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.valueOf(logLevel));
 
                     OkHttpClient httpClient = new OkHttpClient.Builder()
                             .connectionPool(CONNECTION_POOL)
-                            .addInterceptor(new AuthInterceptor(token))
+                            .addInterceptor(new AuthInterceptor(credentialsId))
                             .addInterceptor(new RateLimitInterceptor(this))
                             .addInterceptor(loggingInterceptor)
                             .build();
@@ -154,25 +154,38 @@ class HetznerApiClient {
         return remaining.get();
     }
 
+    /**
+     * Invalidate this client so the next proxy() call rebuilds with fresh credentials.
+     * Called on HTTP 401 (token may have been rotated in Jenkins).
+     */
+    void invalidate() {
+        synchronized (this) {
+            api = null;
+        }
+        INSTANCES.invalidate(credentialsId);
+        log.info("HetznerApiClient invalidated for credentialsId={} (will rebuild on next use)", credentialsId);
+    }
+
     /** Visible for testing. */
     static void resetAll() {
         INSTANCES.invalidateAll();
     }
 
     /**
-     * Minimal auth interceptor: adds Bearer token header.
-     * Replaces upstream AuthenticationInterceptor to avoid depending
-     * on its package-private visibility.
+     * Auth interceptor that resolves the token lazily on every request.
+     * Uses JenkinsSecretTokenProvider (in-memory credential lookup) so
+     * token rotations are picked up immediately without cache invalidation.
      */
     private static class AuthInterceptor implements okhttp3.Interceptor {
-        private final String token;
+        private final String credentialsId;
 
-        AuthInterceptor(String token) {
-            this.token = token;
+        AuthInterceptor(String credentialsId) {
+            this.credentialsId = credentialsId;
         }
 
         @Override
         public okhttp3.Response intercept(Chain chain) throws java.io.IOException {
+            String token = JenkinsSecretTokenProvider.forCredentialsId(credentialsId).get();
             return chain.proceed(chain.request().newBuilder()
                     .header("Authorization", "Bearer " + token)
                     .header("User-Agent", "hetzner-cloud-plugin/jenkins")
