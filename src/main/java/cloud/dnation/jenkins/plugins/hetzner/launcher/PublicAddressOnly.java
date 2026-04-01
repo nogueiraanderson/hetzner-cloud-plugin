@@ -28,6 +28,11 @@ import org.kohsuke.stapler.DataBoundConstructor;
 public class PublicAddressOnly extends AbstractConnectionMethod {
     @Override
     public String getAddress(ServerDetail server) {
+        if (server.getPublicNet() == null || server.getPublicNet().getIpv4() == null) {
+            throw new IllegalStateException(String.format(
+                    "Server '%s' (id=%d) has no public IPv4 address; check that the server was created with public networking enabled",
+                    server.getName(), server.getId()));
+        }
         return server.getPublicNet().getIpv4().getIp();
     }
 

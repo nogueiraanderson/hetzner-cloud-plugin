@@ -32,9 +32,13 @@ public class DefaultConnectionMethod extends AbstractConnectionMethod {
     public String getAddress(ServerDetail server) {
         if (server.getPrivateNet() != null && !server.getPrivateNet().isEmpty()) {
             return server.getPrivateNet().get(0).getIp();
-        } else {
-            return server.getPublicNet().getIpv4().getIp();
         }
+        if (server.getPublicNet() == null || server.getPublicNet().getIpv4() == null) {
+            throw new IllegalStateException(String.format(
+                    "Server '%s' (id=%d) has no public IPv4 address and no private network",
+                    server.getName(), server.getId()));
+        }
+        return server.getPublicNet().getIpv4().getIp();
     }
 
     @Extension

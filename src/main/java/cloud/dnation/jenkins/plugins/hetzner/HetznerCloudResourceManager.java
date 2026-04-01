@@ -16,7 +16,6 @@
 package cloud.dnation.jenkins.plugins.hetzner;
 
 import cloud.dnation.hetznerclient.AbstractSearchResponse;
-import cloud.dnation.hetznerclient.ClientFactory;
 import cloud.dnation.hetznerclient.CreateServerFirewallsRequest;
 import cloud.dnation.hetznerclient.CreateServerRequest;
 import cloud.dnation.hetznerclient.CreateServerResponse;
@@ -52,10 +51,15 @@ import retrofit2.Response;
 
 import java.io.IOException;
 import java.util.Collections;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -105,8 +109,64 @@ public class HetznerCloudResourceManager {
                 .collect(Collectors.joining(","));
     }
 
+    // --- Caches (static, shared across all HetznerCloudResourceManager instances) ---
+
+    // SSH key: credentialsId -> SshKeyDetail. Keys are immutable after creation.
+    private static final Cache<String, SshKeyDetail> SSH_KEY_CACHE =
+            CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.MINUTES).maximumSize(50)
+                    .recordStats().build();
+
+    // Label expression -> resource ID. Images/networks/firewalls/placement groups rarely change.
+    private static final Cache<String, Long> LABEL_ID_CACHE =
+            CacheBuilder.newBuilder().expireAfterWrite(15, TimeUnit.MINUTES).maximumSize(200)
+                    .recordStats().build();
+
+    // Server list: cloudName -> List<ServerDetail>. Short TTL; invalidated on create/destroy.
+    private static final Cache<String, List<ServerDetail>> SERVER_LIST_CACHE =
+            CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.SECONDS).maximumSize(20)
+                    .recordStats().build();
+
+    /**
+     * Return cache statistics for operational observability.
+     * Callable from Jenkins Script Console via:
+     *   println cloud.dnation.jenkins.plugins.hetzner.HetznerCloudResourceManager.getCacheStats()
+     */
+    public static String getCacheStats() {
+        return String.format(
+                "SSH_KEY_CACHE:  size=%d hits=%d misses=%d hitRate=%.1f%%\n"
+              + "LABEL_ID_CACHE: size=%d hits=%d misses=%d hitRate=%.1f%%\n"
+              + "SERVER_LIST:    size=%d hits=%d misses=%d hitRate=%.1f%%",
+                SSH_KEY_CACHE.size(), SSH_KEY_CACHE.stats().hitCount(),
+                SSH_KEY_CACHE.stats().missCount(), SSH_KEY_CACHE.stats().hitRate() * 100,
+                LABEL_ID_CACHE.size(), LABEL_ID_CACHE.stats().hitCount(),
+                LABEL_ID_CACHE.stats().missCount(), LABEL_ID_CACHE.stats().hitRate() * 100,
+                SERVER_LIST_CACHE.size(), SERVER_LIST_CACHE.stats().hitCount(),
+                SERVER_LIST_CACHE.stats().missCount(), SERVER_LIST_CACHE.stats().hitRate() * 100);
+    }
+
+    private HetznerApiClient apiClient() {
+        return HetznerApiClient.forCredentials(credentialsId);
+    }
+
     private HetznerApi proxy() {
-        return ClientFactory.create(JenkinsSecretTokenProvider.forCredentialsId(credentialsId));
+        return apiClient().proxy();
+    }
+
+    /**
+     * Throw if the API token is currently rate-limited. Prevents burning
+     * API budget on calls that will certainly fail with HTTP 429.
+     */
+    private void checkRateLimit(String context) {
+        HetznerApiClient client = apiClient();
+        if (client.isRateLimited()) {
+            long resetSeconds = client.timeUntilReset().toSeconds();
+            log.info("Rate-limit guard blocked {} (remaining={}, resets in {}s)",
+                    context, client.getRemaining(), resetSeconds);
+            throw new HetznerProvisioningException(
+                    String.format("Token rate-limited, skipping %s (resets in %ds)",
+                            context, resetSeconds),
+                    429, "rate_limit_exceeded", "token-global");
+        }
     }
 
     /**
@@ -173,14 +233,24 @@ public class HetznerCloudResourceManager {
             String labelExpression,
             Function<String, Call<R>> searchFunction,
             Function<R, List<I>> getItemsFunction) throws IOException {
-        log.info("Trying to find single resource for label expression '{}'", labelExpression);
+        // Check cache first (label->ID mappings are stable)
+        Long cachedId = LABEL_ID_CACHE.getIfPresent(labelExpression);
+        if (cachedId != null) {
+            log.debug("Label expression cache hit: '{}' -> {}", labelExpression, cachedId);
+            return cachedId;
+        }
+
+        log.debug("Label expression cache miss, querying API for '{}'", labelExpression);
         final Response<R> response = searchFunction.apply(labelExpression).execute();
         assertValidResponse(response);
         List<I> items = getPayload(response, getItemsFunction);
         Preconditions.checkArgument(items.size() == 1,
                 "No exact match found for expression '%s', results %d",
                 labelExpression, items.size());
-        return Iterables.getOnlyElement(items).getId();
+        long id = Iterables.getOnlyElement(items).getId();
+        LABEL_ID_CACHE.put(labelExpression, id);
+        log.debug("Label expression cached: '{}' -> {}", labelExpression, id);
+        return id;
     }
 
     /**
@@ -206,8 +276,14 @@ public class HetznerCloudResourceManager {
                 try {
                     Thread.sleep(5000); // Wait 5 seconds between checks
 
+                    if (apiClient().isRateLimited()) {
+                        log.warn("Token rate-limited during shutdown wait for server {}, skipping poll", serverId);
+                        break;
+                    }
+
                     Response<GetServerByIdResponse> response = client.getServer(serverId).execute();
-                    if (response.isSuccessful() && response.body() != null) {
+                    if (response.isSuccessful() && response.body() != null
+                            && response.body().getServer() != null) {
                         ServerDetail currentState = response.body().getServer();
                         if ("off".equals(currentState.getStatus())) {
                             isShutdown = true;
@@ -231,9 +307,19 @@ public class HetznerCloudResourceManager {
             // Delete the server
             assertValidResponse(client.deleteServer(serverId).execute());
             log.info("Server with ID = {} successfully deleted", serverId);
-        } catch (IOException e) {
-            log.error("Unable to destroy server with ID = {}", serverId, e);
-            throw new IllegalStateException(e);
+            SERVER_LIST_CACHE.invalidateAll();
+            log.debug("Server list cache invalidated after destroyServer (id={})", serverId);
+        } catch (Exception e) {
+            // Catch ALL exceptions (IOException, IllegalStateException from
+            // assertValidResponse on HTTP 429/412, and any other RuntimeException).
+            // This method is called from _terminate() and OrphanedNodesCleaner,
+            // both running inside periodic timers. An unchecked exception here
+            // kills the timer thread permanently, disabling idle cleanup for
+            // ALL nodes on this Jenkins instance.
+            // The OrphanedNodesCleaner will retry deletion on its next hourly run.
+            log.error("Unable to destroy server with ID = {} (name={}). "
+                    + "Server may become orphaned and will be retried by OrphanedNodesCleaner.",
+                    serverId, server.getName(), e);
         }
     }
 
@@ -244,26 +330,42 @@ public class HetznerCloudResourceManager {
      * @return SshKeyDetail
      */
     private SshKeyDetail getOrCreateSshKey(HetznerServerTemplate template) throws IOException {
-        final HetznerApi client = proxy();
-        final String credentialsId = template.getConnector().getSshCredentialsId();
+        final String sshCredId = template.getConnector().getSshCredentialsId();
 
-        final BasicSSHUserPrivateKey privateKey = assertSshKey(credentialsId);
+        // Check cache first (SSH keys are immutable after creation)
+        SshKeyDetail cached = SSH_KEY_CACHE.getIfPresent(sshCredId);
+        if (cached != null) {
+            log.debug("SSH key cache hit for credentialsId={}", sshCredId);
+            return cached;
+        }
+
+        checkRateLimit("getOrCreateSshKey");
+        final HetznerApi client = proxy();
+
+        final BasicSSHUserPrivateKey privateKey = assertSshKey(sshCredId);
         final Response<GetSshKeysBySelectorResponse> searchResponse = client.getSshKeysBySelector(
-                        buildLabelExpressionForSshKey(credentialsId))
+                        buildLabelExpressionForSshKey(sshCredId))
                 .execute();
         assertValidResponse(searchResponse);
         final List<SshKeyDetail> sshKeys = getPayload(searchResponse, GetSshKeysBySelectorResponse::getSshKeys);
+
+        SshKeyDetail result;
         if (!sshKeys.isEmpty()) {
-            return Iterables.getOnlyElement(sshKeys);
+            result = Iterables.getOnlyElement(sshKeys);
+        } else {
+            final String publicKey = getSSHPublicKeyFromPrivate(privateKey.getPrivateKey(),
+                    Secret.toString(privateKey.getPassphrase()));
+            final Response<CreateSshKeyResponse> createResponse = proxy().createSshKey(new CreateSshKeyRequest()
+                            .labels(createLabelsForSshKey(sshCredId))
+                            .name(sshCredId)
+                            .publicKey(publicKey))
+                    .execute();
+            result = assertValidResponse(createResponse, CreateSshKeyResponse::getSshKey);
         }
-        final String publicKey = getSSHPublicKeyFromPrivate(privateKey.getPrivateKey(),
-                Secret.toString(privateKey.getPassphrase()));
-        final Response<CreateSshKeyResponse> createResponse = proxy().createSshKey(new CreateSshKeyRequest()
-                        .labels(createLabelsForSshKey(credentialsId))
-                        .name(template.getConnector().getSshCredentialsId())
-                        .publicKey(publicKey))
-                .execute();
-        return assertValidResponse(createResponse, CreateSshKeyResponse::getSshKey);
+
+        SSH_KEY_CACHE.put(sshCredId, result);
+        log.debug("SSH key cached for credentialsId={} (id={})", sshCredId, result.getId());
+        return result;
     }
 
     /**
@@ -274,15 +376,11 @@ public class HetznerCloudResourceManager {
      * @throws IllegalArgumentException if server didn't respond with code HTTP200
      * @throws IllegalStateException    if API call fails
      */
-    public HetznerServerInfo refreshServerInfo(HetznerServerInfo info) {
-        try {
-            final Response<GetServerByIdResponse> response = proxy().getServer(info.getServerDetail().getId())
-                    .execute();
-            info.setServerDetail(assertValidResponse(response, GetServerByIdResponse::getServer));
-            return info;
-        } catch (IOException e) {
-            throw new IllegalStateException(e);
-        }
+    public HetznerServerInfo refreshServerInfo(HetznerServerInfo info) throws IOException {
+        final Response<GetServerByIdResponse> response = proxy().getServer(info.getServerDetail().getId())
+                .execute();
+        info.setServerDetail(assertValidResponse(response, GetServerByIdResponse::getServer));
+        return info;
     }
 
     @SneakyThrows
@@ -341,6 +439,7 @@ public class HetznerCloudResourceManager {
      * @return instance of {@link CreateServerResponse}
      */
     public HetznerServerInfo createServer(HetznerServerAgent agent) {
+        checkRateLimit("createServer");
         try {
             lock.writeLock().lock();
             final SshKeyDetail sshKey = getOrCreateSshKey(agent.getTemplate());
@@ -400,9 +499,37 @@ public class HetznerCloudResourceManager {
             log.debug("Calling API to create server resource : {}", createServerRequest);
             final Response<CreateServerResponse> createServerResponse = proxy().createServer(createServerRequest)
                     .execute();
+            if (!createServerResponse.isSuccessful()) {
+                String errorBody = null;
+                try {
+                    if (createServerResponse.errorBody() != null) {
+                        errorBody = createServerResponse.errorBody().string();
+                    }
+                } catch (IOException ignored) {
+                    // best effort
+                }
+                String errorCode = Helper.parseHetznerErrorCode(errorBody);
+                String location = agent.getTemplate().getLocation();
+                throw new HetznerProvisioningException(
+                        String.format("Hetzner API error creating server in %s: HTTP %d, code=%s, body=%s",
+                                location, createServerResponse.code(), errorCode, errorBody),
+                        createServerResponse.code(),
+                        errorCode,
+                        location);
+            }
             final HetznerServerInfo info = new HetznerServerInfo(sshKey);
             info.setServerDetail(assertValidResponse(createServerResponse, CreateServerResponse::getServer));
+            log.info("Server created: name={}, id={}, dc={}, type={} (remaining={})",
+                    info.getServerDetail().getName(), info.getServerDetail().getId(),
+                    agent.getTemplate().getLocation(), agent.getTemplate().getServerType(),
+                    apiClient().getRemaining());
+            // Invalidate server list cache so runningNodeCount() sees the new server
+            String cloudName = agent.getTemplate().getCloud().name;
+            SERVER_LIST_CACHE.invalidate(cloudName);
+            log.debug("Server list cache invalidated for cloud={} after createServer", cloudName);
             return info;
+        } catch (HetznerProvisioningException e) {
+            throw e; // propagate typed exception without wrapping
         } catch (IOException e) {
             throw new IllegalStateException(e);
         } finally {
@@ -411,8 +538,20 @@ public class HetznerCloudResourceManager {
     }
 
     public List<ServerDetail> fetchAllServers(String cloudName) throws IOException {
+        List<ServerDetail> cached = SERVER_LIST_CACHE.getIfPresent(cloudName);
+        if (cached != null) {
+            log.debug("Server list cache hit for cloud={} ({} servers)", cloudName, cached.size());
+            return cached;
+        }
+
+        checkRateLimit("fetchAllServers");
         final String selector = createLabelsForServer(cloudName).entrySet().stream().map(e -> e.getKey() + "=" + e.getValue())
                 .collect(Collectors.joining(","));
-        return PagedResourceHelper.getAllServers(proxy(), selector);
+        List<ServerDetail> servers = Collections.unmodifiableList(
+                PagedResourceHelper.getAllServers(proxy(), selector));
+        SERVER_LIST_CACHE.put(cloudName, servers);
+        log.debug("Server list fetched and cached for cloud={} ({} servers, remaining={})",
+                cloudName, servers.size(), apiClient().getRemaining());
+        return servers;
     }
 }

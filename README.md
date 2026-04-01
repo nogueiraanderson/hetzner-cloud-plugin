@@ -14,7 +14,112 @@
  limitations under the License.
 -->
 
-# Hetzner Cloud Plugin for Jenkins
+# Hetzner Cloud Plugin for Jenkins (Percona patched fork)
+
+Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness fixes for idle node retention and cleanup.
+
+## Percona patches
+
+### v103.percona.3: DC circuit breaker failover
+
+Per-datacenter circuit breakers that automatically route provisioning away from
+unhealthy Hetzner locations (e.g., during DC maintenance or API outages).
+
+| Component | Purpose |
+|-----------|---------|
+| `DcCircuitBreaker` | Per-DC state machine (CLOSED / OPEN / HALF_OPEN) |
+| `DcHealthTracker` | Tracks consecutive failures per location |
+| `HetznerProvisioningException` | Typed exception for provisioning failures |
+
+Behavior:
+- Triggers on HTTP 422 / `resource_unavailable` from Hetzner API
+- 2-failure threshold trips the breaker for a DC
+- 5-minute auto-reset moves to HALF_OPEN, allowing a single probe request
+- Successful probe closes the breaker; failure re-opens it
+- All state is in-memory (resets on JVM restart)
+
+#### Observability via CLI
+
+The `jenkins hetzner` CLI provides structured access to DC health state:
+
+```bash
+# Single instance
+jenkins hetzner -i rel health           # DC breaker status
+jenkins hetzner -i rel status           # Overview (plugin + clouds + DCs + nodes)
+jenkins hetzner -i rel nodes            # Active hcloud-* workers
+jenkins hetzner -i rel servers          # Running VMs from Hetzner API
+jenkins hetzner -i rel templates        # Configured server templates
+jenkins hetzner -i rel version          # Plugin version + MD5
+jenkins hetzner -i rel orphans          # Orphan VMs + ghost nodes
+jenkins hetzner -i rel reset [dc]       # Reset circuit breaker
+jenkins hetzner -i rel trip <dc>        # Simulate DC failure
+
+# Fleet-wide
+jenkins hetzner fleet health            # DC health across all 10 instances
+jenkins hetzner fleet versions          # Plugin versions across all 10 instances
+```
+
+All commands support `--json`, `--llm`, `--raw` output modes.
+
+### v103.percona.1: Retention bug fixes
+
+Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
+
+**Bug 1 (critical): `ComputerRetentionWork` timer death.** `destroyServer()` wraps `IOException` in `IllegalStateException`. This unchecked exception propagates through `CloudRetentionStrategy.check()` into `ComputerRetentionWork.doRun()`, permanently killing the periodic retention timer. After that, no idle node on the instance ever gets cleaned up until Jenkins restarts. Confirmed empirically: CRW was dead for 28 hours on two production instances.
+
+**Bug 2: One-directional orphan cleanup.** `OrphanedNodesCleaner` only removes VMs without Jenkins nodes. It does not remove Jenkins nodes without VMs (ghost nodes), which accumulate after API failures or restarts.
+
+**Bug 3: Null transient fields after restart.** `cloud`, `template`, and `serverInstance` are `transient` fields. After Jenkins restart/deserialization they are null, causing NPE in `_terminate()` and `isAlive()`.
+
+### Changes
+
+| File | Fix |
+|------|-----|
+| `HetznerServerAgent._terminate()` | Catch all exceptions (protects CRW timer), null guards for transient fields, safe launcher cast |
+| `HetznerServerAgent.isAlive()` | Full null safety, catch-all returning false |
+| `HetznerServerAgent.getDisplayName()` | Complete null chain protection |
+| `HetznerCloudResourceManager.destroyServer()` | Log-and-return on IOException instead of throwing IllegalStateException |
+| `HetznerCloudResourceManager.refreshServerInfo()` | Throws IOException (checked) instead of IllegalStateException |
+| `OrphanedNodesCleaner` | Bi-directional cleanup (VMs without nodes AND nodes without VMs), per-item try-catch, catch-all in doRun() |
+| `Helper.assertValidResponse()` | Null body guard |
+| `HelperTest` | Tests for null body and error response handling |
+
+### Build
+
+Requires [just](https://github.com/casey/just) and Docker:
+
+```bash
+just build    # Build .hpi (skips tests, ~2min with cached deps)
+just test     # Build + run tests (~7min first run, cached after)
+```
+
+Maven dependencies are cached in a Docker volume (`hetzner-m2-cache`).
+
+### Deploy
+
+Drop-in replacement for upstream hetzner-cloud v103. Same artifact name, same dependencies.
+
+```bash
+# Deploy to a single instance
+just deploy rel
+
+# Deploy to all 10 instances
+just deploy-all
+
+# Verify deployment
+just check
+jenkins hetzner fleet versions
+```
+
+Post-deploy validation:
+
+```bash
+jenkins hetzner -i <inst> version      # Confirm version + MD5
+jenkins hetzner -i <inst> templates    # Confirm 15 templates present
+jenkins hetzner -i <inst> health       # Confirm breakers CLOSED
+```
+
+## Original README
 
 The Hetzner cloud plugin enables [Jenkins CI](https://www.jenkins.io/) to schedule builds on dynamically provisioned VMs in [Hetzner Cloud](https://www.hetzner.com/cloud).
 Servers in Hetzner cloud are provisioned as they are needed, based on labels assigned to them.

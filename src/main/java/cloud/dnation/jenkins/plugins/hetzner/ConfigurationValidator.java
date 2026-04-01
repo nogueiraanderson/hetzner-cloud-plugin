@@ -15,7 +15,6 @@
  */
 package cloud.dnation.jenkins.plugins.hetzner;
 
-import cloud.dnation.hetznerclient.ClientFactory;
 import cloud.dnation.hetznerclient.GetDatacentersResponse;
 import cloud.dnation.hetznerclient.GetFirewallByIdResponse;
 import cloud.dnation.hetznerclient.GetFirewallsBySelectorResponse;
@@ -63,7 +62,7 @@ public class ConfigurationValidator {
      * @return ValidationResult
      */
     private static ValidationResult validateWithClient(ValidationAction action, String credentialsId) {
-        final HetznerApi client = ClientFactory.create(JenkinsSecretTokenProvider.forCredentialsId(credentialsId));
+        final HetznerApi client = HetznerApiClient.forCredentials(credentialsId).proxy();
         try {
             return action.validate(client);
         } catch (Exception e) {
@@ -198,7 +197,7 @@ public class ConfigurationValidator {
         return validateWithClient(api -> {
             final GetServerTypesResponse result = api.getAllServerTypesWithName(serverType).execute().body();
             Preconditions.checkArgument(result.getServerTypes().size() == 1,
-                    "Expected exactly one result, got {}", result.getServerTypes().size());
+                    "Expected exactly one result, got %s", result.getServerTypes().size());
             return new ValidationResult(true, "Found: " +
                     result.getServerTypes().get(0).getDescription());
 
@@ -222,7 +221,7 @@ public class ConfigurationValidator {
         return validateWithClient(api -> {
             final GetLocationsResponse result = api.getAllLocationsWithName(location).execute().body();
             Preconditions.checkArgument(result.getLocations().size() == 1,
-                    "Expected exactly one result, got {}", result.getLocations().size());
+                    "Expected exactly one result, got %s", result.getLocations().size());
             return new ValidationResult(true, "Found: " +
                     result.getLocations().get(0).getDescription());
 

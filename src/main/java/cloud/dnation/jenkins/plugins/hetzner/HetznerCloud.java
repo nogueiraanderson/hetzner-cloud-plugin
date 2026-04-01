@@ -63,7 +63,6 @@ public class HetznerCloud extends AbstractCloudImpl {
     private final String credentialsId;
     @Getter
     private List<HetznerServerTemplate> serverTemplates;
-    @Getter
     private transient HetznerCloudResourceManager resourceManager;
 
     @DataBoundConstructor
@@ -76,18 +75,15 @@ public class HetznerCloud extends AbstractCloudImpl {
     }
 
     /**
-     * Pick random template from provided list.
+     * Rank templates by DC health: healthy DCs first, unhealthy last.
+     * Within each partition, templates are shuffled randomly.
+     * When all DCs are healthy (normal case), equivalent to random shuffle.
      *
      * @param matchingTemplates List of all matching templates.
-     * @return picked template
+     * @return ranked list (healthy first)
      */
-    private static HetznerServerTemplate pickTemplate(List<HetznerServerTemplate> matchingTemplates) {
-        if (matchingTemplates.size() == 1) {
-            return matchingTemplates.get(0);
-        }
-        final List<HetznerServerTemplate> shuffled = new ArrayList<>(matchingTemplates);
-        Collections.shuffle(shuffled);
-        return shuffled.get(0);
+    static List<HetznerServerTemplate> rankTemplatesByHealth(List<HetznerServerTemplate> matchingTemplates) {
+        return DcHealthTracker.sortByHealth(matchingTemplates);
     }
 
     @DataBoundSetter
@@ -108,9 +104,16 @@ public class HetznerCloud extends AbstractCloudImpl {
         return this;
     }
 
+    public HetznerCloudResourceManager getResourceManager() {
+        if (resourceManager == null) {
+            resourceManager = HetznerCloudResourceManager.create(credentialsId);
+        }
+        return resourceManager;
+    }
+
     @SneakyThrows
     private int runningNodeCount() {
-        return Ints.checkedCast(resourceManager.fetchAllServers(name)
+        return Ints.checkedCast(getResourceManager().fetchAllServers(name)
                 .stream()
                 .filter(sd -> HetznerConstants.RUNNABLE_STATE_SET.contains(sd.getStatus()))
                 .count());
@@ -129,10 +132,24 @@ public class HetznerCloud extends AbstractCloudImpl {
                     log.warn("Jenkins is going down, no new nodes will be provisioned");
                     break;
                 }
+                HetznerApiClient apiClient = HetznerApiClient.forCredentials(credentialsId);
+                if (apiClient.isRateLimited()) {
+                    log.warn("Hetzner API token rate-limited, suppressing provisioning for cloud '{}' "
+                            + "(remaining={}, resets in {}s)",
+                            name, apiClient.getRemaining(), apiClient.timeUntilReset().toSeconds());
+                    break;
+                }
                 int running = runningNodeCount();
                 int instanceCap = getInstanceCap();
                 int available = instanceCap - running;
-                final HetznerServerTemplate template = pickTemplate(matchingTemplates);
+                final List<HetznerServerTemplate> rankedTemplates = rankTemplatesByHealth(matchingTemplates);
+                final HetznerServerTemplate template = rankedTemplates.get(0);
+                if (TemplateErrorTracker.isSuppressed(template.getName())) {
+                    log.warn("Template '{}' suppressed due to recurring config errors "
+                            + "(image={}). Provisioning skipped; fix template config "
+                            + "or check Hetzner changelog.", template.getName(), template.getImage());
+                    break;
+                }
                 log.info("Creating new agent with {} executors, have {} running VMs", template.getNumExecutors(), running);
                 if (available <= 0) {
                     log.warn("Cloud capacity reached ({}). Has {} VMs running, but want {} more executors",
@@ -147,16 +164,16 @@ public class HetznerCloud extends AbstractCloudImpl {
                     plannedNodes.add(new TrackedPlannedNode(
                                     provisioningId,
                                     agent.getNumExecutors(),
-                                    Computer.threadPoolForRemoting.submit(new NodeCallable(agent, this)
-                                    )
+                                    Computer.threadPoolForRemoting.submit(
+                                            new NodeCallable(agent, this, rankedTemplates))
                             )
                     );
                     excessWorkload -= agent.getNumExecutors();
                 }
             }
 
-        } catch (IOException | Descriptor.FormException e) {
-            log.error("Unable to provision node", e);
+        } catch (Exception e) {
+            log.error("Unable to provision node for cloud '{}', label '{}'", name, label, e);
         }
         return plannedNodes;
     }

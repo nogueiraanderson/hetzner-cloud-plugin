@@ -29,8 +29,11 @@ import org.kohsuke.stapler.DataBoundConstructor;
 public class PublicV6AddressOnly extends AbstractConnectionMethod {
     @Override
     public String getAddress(ServerDetail server) {
-        if (server.getPublicNet().getIpv6() == null || Strings.isNullOrEmpty(server.getPublicNet().getIpv6().getIp())) {
-            throw new IllegalArgumentException("Connection method requires IPv6 address");
+        if (server.getPublicNet() == null || server.getPublicNet().getIpv6() == null
+                || Strings.isNullOrEmpty(server.getPublicNet().getIpv6().getIp())) {
+            throw new IllegalStateException(String.format(
+                    "Server '%s' (id=%d) has no public IPv6 address; check that the server was created with IPv6 networking enabled",
+                    server.getName(), server.getId()));
         }
         // value returned by API ends with "::/64" so replace it with "1"
         return server.getPublicNet().getIpv6().getIp().replaceFirst("::/64$", "::1");

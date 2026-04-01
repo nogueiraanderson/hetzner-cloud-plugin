@@ -128,9 +128,26 @@ public class Helper {
     }
 
     public static <T, E> E assertValidResponse(Response<T> response, Function<T, E> mapper) {
-        Preconditions.checkState(response.isSuccessful(), "Invalid API response : %s",
-                response.code());
-        return mapper.apply(response.body());
+        if (!response.isSuccessful()) {
+            // Throw typed exception for 429 so callers can distinguish rate-limiting
+            if (response.code() == 429) {
+                String errorBody = null;
+                try {
+                    if (response.errorBody() != null) {
+                        errorBody = response.errorBody().string();
+                    }
+                } catch (java.io.IOException ignored) { }
+                String errorCode = parseHetznerErrorCode(errorBody);
+                throw new HetznerProvisioningException(
+                        String.format("Hetzner API rate limited: HTTP 429, code=%s, body=%s",
+                                errorCode, errorBody),
+                        429, errorCode != null ? errorCode : "rate_limit_exceeded", "api");
+            }
+            Preconditions.checkState(false, "Invalid API response: HTTP %s", response.code());
+        }
+        T body = response.body();
+        Preconditions.checkState(body != null, "API returned HTTP %s with null body", response.code());
+        return mapper.apply(body);
     }
 
     public static <T> void assertValidResponse(Response<T> response) {
@@ -211,6 +228,27 @@ public class Helper {
                 .map(HetznerServerAgent.class::cast)
                 .collect(Collectors.toList());
     }
+
+    /**
+     * Parse the Hetzner error code from an API error response body.
+     * Expected format: {"error":{"code":"resource_unavailable","message":"..."}}
+     *
+     * @param errorBody raw response body string (may be null)
+     * @return the error code string, or null if unparseable
+     */
+    public static String parseHetznerErrorCode(String errorBody) {
+        if (Strings.isNullOrEmpty(errorBody)) {
+            return null;
+        }
+        java.util.regex.Matcher m = HETZNER_ERROR_CODE_RE.matcher(errorBody);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+
+    private static final Pattern HETZNER_ERROR_CODE_RE =
+            Pattern.compile("\"error\"\\s*:\\s*\\{[^}]*\"code\"\\s*:\\s*\"([^\"]+)\"");
 
     public static boolean isValidLabelValue(String value) {
         if (Strings.isNullOrEmpty(value)) {
