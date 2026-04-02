@@ -16,9 +16,62 @@
 
 # Hetzner Cloud Plugin for Jenkins (Percona patched fork)
 
-Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness fixes for idle node retention and cleanup.
+Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness, rate-limiting, retry, and DC failover patches.
+
+Current version: **v103.percona.5** (17 commits ahead of upstream).
 
 ## Percona patches
+
+### v103.percona.5: Retry and template error suppression
+
+OkHttp retry interceptor and template-level error tracking to handle transient API failures and suppress misconfigured templates.
+
+| Component | Purpose |
+|-----------|---------|
+| `RetryInterceptor` | OkHttp interceptor with exponential backoff and jitter for transient errors (429, 502, 504, socket timeouts) |
+| `TemplateErrorTracker` | Suppresses templates with persistent config errors (e.g., deprecated image IDs) |
+
+Behavior:
+- **Retry:** Max 3 retries with AWS-style full jitter. Honors `Retry-After` header for 429. Does not retry 401/403/404/409/422/500/503
+- **Template suppression:** 3-failure threshold suppresses a template for 30 minutes. Half-open probe on expiry allows a single attempt before re-suppressing
+- Config errors (`invalid_input`) abort DC failover immediately (not DC-scoped)
+- Rate-limit (429) during DC failover aborts the entire provisioning attempt (token-scoped, not DC-scoped)
+- Boot status polling skips API calls when rate-limited
+- Observability via Script Console: `TemplateErrorTracker.getStatus()`
+
+| File | Change |
+|------|--------|
+| `RetryInterceptor` | New: OkHttp interceptor with exponential backoff + jitter |
+| `TemplateErrorTracker` | New: per-template error tracking and suppression |
+| `NodeCallable.call()` | Config error detection, rate-limit abort during failover |
+| `HetznerCloud.provision()` | Check `TemplateErrorTracker.isSuppressed()` before using a template |
+
+### v103.percona.4: Rate-limit infrastructure and API caching
+
+Per-token API client with rate-limit awareness, response caching, and hardened exception handling.
+
+| Component | Purpose |
+|-----------|---------|
+| `HetznerApiClient` | Per-token API client wrapper with rate-limit state tracking and lazy auth |
+| `RateLimitInterceptor` | OkHttp interceptor parsing `RateLimit-Limit/Remaining/Reset` headers |
+| API caches | Guava caches for SSH keys (30min), label IDs (15min), server lists (30sec) |
+
+Behavior:
+- `checkRateLimit()` guard before API-intensive operations (`createServer`, `getOrCreateSshKey`, `fetchAllServers`)
+- Lazy auth via `AuthInterceptor` picks up token rotations immediately
+- HTTP 401 invalidates the cached client (supports token rotation)
+- Cache stats available via `HetznerCloudResourceManager.getCacheStats()` (Script Console)
+- `OrphanedNodesCleaner` skips cleanup cycle when rate-limited
+- `destroyServer()` catches `Exception` (not just `IOException`), fixing the CRW timer death bug for all exception types
+
+| File | Change |
+|------|--------|
+| `HetznerApiClient` | New: per-token client with rate-limit state, lazy auth, 401 invalidation |
+| `RateLimitInterceptor` | New: OkHttp interceptor for rate-limit header parsing |
+| `HetznerCloudResourceManager` | Replaced `ClientFactory.create()` with `HetznerApiClient.forCredentials()`, added API caches, rate-limit guards |
+| `HetznerCloud.provision()` | Rate-limit check before provisioning |
+| `OrphanedNodesCleaner` | Skip cleanup when rate-limited |
+| `Helper.assertValidResponse()` | Throws `HetznerProvisioningException` on HTTP 429 |
 
 ### v103.percona.3: DC circuit breaker failover
 
@@ -28,15 +81,25 @@ unhealthy Hetzner locations (e.g., during DC maintenance or API outages).
 | Component | Purpose |
 |-----------|---------|
 | `DcCircuitBreaker` | Per-DC state machine (CLOSED / OPEN / HALF_OPEN) |
-| `DcHealthTracker` | Tracks consecutive failures per location |
-| `HetznerProvisioningException` | Typed exception for provisioning failures |
+| `DcHealthTracker` | Tracks consecutive failures per location, ranks templates by DC health |
+| `HetznerProvisioningException` | Typed exception carrying HTTP status, Hetzner error code, and DC location |
 
 Behavior:
-- Triggers on HTTP 422 / `resource_unavailable` from Hetzner API
+- Triggers on HTTP 422 / `resource_unavailable` / `placement_error` / `server_limit_exceeded` from Hetzner API
 - 2-failure threshold trips the breaker for a DC
 - 5-minute auto-reset moves to HALF_OPEN, allowing a single probe request
 - Successful probe closes the breaker; failure re-opens it
+- `HetznerCloud.pickTemplate()` replaced with `rankTemplatesByHealth()` (healthy DCs first, shuffled within partitions)
+- `NodeCallable` rewritten with DC failover loop: iterates through ranked templates, tries each DC, records success/failure
 - All state is in-memory (resets on JVM restart)
+
+| File | Change |
+|------|--------|
+| `DcCircuitBreaker` | New: per-DC state machine with threshold and auto-reset |
+| `DcHealthTracker` | New: registry of breakers, `sortByHealth()` for template ranking |
+| `HetznerProvisioningException` | New: typed exception with `isRateLimited()`, `isConfigError()`, `isResourceUnavailable()` |
+| `HetznerCloud` | `pickTemplate()` -> `rankTemplatesByHealth()`, passes ranked list to `NodeCallable` |
+| `NodeCallable` | Complete rewrite with DC failover loop, cleanup on bootstrap failure |
 
 #### Observability via CLI
 
@@ -61,6 +124,20 @@ jenkins hetzner fleet versions          # Plugin versions across all 10 instance
 
 All commands support `--json`, `--llm`, `--raw` output modes.
 
+### v103.percona.2: Architecture validation and null-safety
+
+Architecture validation to detect wrong CPU type provisioning, launcher null-safety, and deployment tooling.
+
+| File | Change |
+|------|--------|
+| `NodeCallable` | Architecture validation via `inferArchFromServerType()` (CAX* = arm64, else x86_64) and post-boot `uname -m` check via `UnameCallable` |
+| `OrphanedNodesCleaner` | Removed `setTemporarilyOffline()` call for ghost nodes, added race guard |
+| `DefaultConnectionMethod` | Null-safety for `publicNet` / `ipv4` with descriptive errors |
+| `DefaultV6ConnectionMethod` | Null-safety for `publicNet` / `ipv6` with descriptive errors |
+| `PublicAddressOnly` | Null-safety for `publicNet` / `ipv4` with descriptive errors |
+| `PublicV6AddressOnly` | Null-safety for `publicNet` / `ipv6`, `IllegalArgumentException` -> `IllegalStateException` |
+| `AbstractByLabelSelector` | `.findFirst().get()` -> `.findFirst().orElseThrow()` with descriptive error |
+
 ### v103.percona.1: Retention bug fixes
 
 Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
@@ -70,8 +147,6 @@ Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
 **Bug 2: One-directional orphan cleanup.** `OrphanedNodesCleaner` only removes VMs without Jenkins nodes. It does not remove Jenkins nodes without VMs (ghost nodes), which accumulate after API failures or restarts.
 
 **Bug 3: Null transient fields after restart.** `cloud`, `template`, and `serverInstance` are `transient` fields. After Jenkins restart/deserialization they are null, causing NPE in `_terminate()` and `isAlive()`.
-
-### Changes
 
 | File | Fix |
 |------|-----|
@@ -84,7 +159,7 @@ Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
 | `Helper.assertValidResponse()` | Null body guard |
 | `HelperTest` | Tests for null body and error response handling |
 
-### Build
+## Build
 
 Requires [just](https://github.com/casey/just) and Docker:
 
@@ -95,7 +170,18 @@ just test     # Build + run tests (~7min first run, cached after)
 
 Maven dependencies are cached in a Docker volume (`hetzner-m2-cache`).
 
-### Deploy
+Additional recipes:
+
+```bash
+just dc-health <inst>        # DC circuit breaker health via Groovy
+just verify <inst>           # Integration verify (create temp job, run, check, delete)
+just verify-failover <inst>  # Test all 5 server types (x64/aarch64)
+just backup <inst>           # Backup cloud config from Jenkins
+just restore <inst>          # Restore cloud config
+just release                 # Tag, push, create GitHub release with .hpi
+```
+
+## Deploy
 
 Drop-in replacement for upstream hetzner-cloud v103. Same artifact name, same dependencies.
 
