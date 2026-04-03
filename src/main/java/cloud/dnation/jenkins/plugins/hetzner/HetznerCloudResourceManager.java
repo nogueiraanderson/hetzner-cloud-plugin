@@ -49,11 +49,10 @@ import lombok.extern.slf4j.Slf4j;
 import retrofit2.Call;
 import retrofit2.Response;
 
-import java.io.IOException;
-import java.util.Collections;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -442,6 +441,26 @@ public class HetznerCloudResourceManager {
         checkRateLimit("createServer");
         try {
             lock.writeLock().lock();
+
+            // Recheck instance cap under write lock to prevent over-provisioning.
+            // The initial cap check in HetznerCloud.provision() is stale by the
+            // time this lock is acquired; concurrent NodeCallables may have created
+            // servers since then.
+            String cloudName = agent.getTemplate().getCloud().name;
+            int instanceCap = agent.getTemplate().getCloud().getInstanceCap();
+            if (instanceCap > 0) {
+                SERVER_LIST_CACHE.invalidate(cloudName);
+                long running = fetchAllServers(cloudName).stream()
+                        .filter(sd -> HetznerConstants.RUNNABLE_STATE_SET.contains(sd.getStatus()))
+                        .count();
+                if (running >= instanceCap) {
+                    throw new HetznerProvisioningException(
+                            String.format("Instance cap reached under lock: %d running >= %d cap "
+                                    + "(cloud=%s)", running, instanceCap, cloudName),
+                            429, "instance_cap_reached", agent.getTemplate().getLocation());
+                }
+            }
+
             final SshKeyDetail sshKey = getOrCreateSshKey(agent.getTemplate());
             final String imageId;
             //check if image is label expression
@@ -524,7 +543,6 @@ public class HetznerCloudResourceManager {
                     agent.getTemplate().getLocation(), agent.getTemplate().getServerType(),
                     apiClient().getRemaining());
             // Invalidate server list cache so runningNodeCount() sees the new server
-            String cloudName = agent.getTemplate().getCloud().name;
             SERVER_LIST_CACHE.invalidate(cloudName);
             log.debug("Server list cache invalidated for cloud={} after createServer", cloudName);
             return info;

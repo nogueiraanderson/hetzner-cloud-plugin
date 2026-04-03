@@ -55,6 +55,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -64,6 +65,17 @@ public class HetznerCloud extends AbstractCloudImpl {
     @Getter
     private List<HetznerServerTemplate> serverTemplates;
     private transient HetznerCloudResourceManager resourceManager;
+
+    /**
+     * Tracks in-flight provisioning requests that have passed the cap check
+     * but not yet called createServer(). This closes the race window where
+     * concurrent provision() calls or loop iterations all see the same stale
+     * runningNodeCount() and over-provision beyond instanceCap.
+     *
+     * Incremented before submitting NodeCallable, decremented in its finally
+     * block (success or failure). Included in the effective cap calculation.
+     */
+    private final transient AtomicInteger pendingProvisions = new AtomicInteger(0);
 
     @DataBoundConstructor
     public HetznerCloud(String name, String credentialsId, String instanceCapStr,
@@ -119,6 +131,26 @@ public class HetznerCloud extends AbstractCloudImpl {
                 .count());
     }
 
+    /**
+     * Effective running count including in-flight provisions not yet visible
+     * in the Hetzner API. Prevents over-provisioning during burst demand.
+     */
+    private int effectiveNodeCount() {
+        return runningNodeCount() + pendingProvisions.get();
+    }
+
+    /**
+     * Decrement the pending provision counter. Called by NodeCallable when
+     * provisioning completes (success or failure).
+     */
+    void provisionCompleted() {
+        int prev = pendingProvisions.getAndDecrement();
+        if (prev <= 0) {
+            pendingProvisions.set(0);
+            log.warn("pendingProvisions underflow corrected (was {})", prev);
+        }
+    }
+
     @Override
     public Collection<PlannedNode> provision(CloudState state, int excessWorkload) {
         log.debug("provision(cloud={},label={},excessWorkload={})", name, state.getLabel(), excessWorkload);
@@ -139,7 +171,7 @@ public class HetznerCloud extends AbstractCloudImpl {
                             name, apiClient.getRemaining(), apiClient.timeUntilReset().toSeconds());
                     break;
                 }
-                int running = runningNodeCount();
+                int running = effectiveNodeCount();
                 int instanceCap = getInstanceCap();
                 int available = instanceCap - running;
                 final List<HetznerServerTemplate> rankedTemplates = rankTemplatesByHealth(matchingTemplates);
@@ -150,12 +182,16 @@ public class HetznerCloud extends AbstractCloudImpl {
                             + "or check Hetzner changelog.", template.getName(), template.getImage());
                     break;
                 }
-                log.info("Creating new agent with {} executors, have {} running VMs", template.getNumExecutors(), running);
+                log.info("Creating new agent with {} executors, have {} running VMs "
+                        + "(pending={})", template.getNumExecutors(), running,
+                        pendingProvisions.get());
                 if (available <= 0) {
-                    log.warn("Cloud capacity reached ({}). Has {} VMs running, but want {} more executors",
-                            instanceCap, running , excessWorkload);
+                    log.warn("Cloud capacity reached ({}). Has {} VMs running+pending, "
+                            + "but want {} more executors",
+                            instanceCap, running, excessWorkload);
                     break;
                 } else {
+                    pendingProvisions.incrementAndGet();
                     final String serverName = template.generateNodeName();
                     final ProvisioningActivity.Id provisioningId = new ProvisioningActivity.Id(name, template.getName(),
                             serverName);

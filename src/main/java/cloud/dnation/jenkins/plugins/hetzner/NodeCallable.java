@@ -58,58 +58,64 @@ class NodeCallable implements Callable<Node> {
 
     @Override
     public Node call() throws Exception {
-        Computer computer = agent.getComputer();
-        if (computer != null && computer.isOnline()) {
-            return agent;
-        }
-
-        // Try provisioning with failover across DCs
-        Exception lastException = null;
-        for (int i = 0; i < rankedTemplates.size(); i++) {
-            HetznerServerTemplate template = rankedTemplates.get(i);
-            String location = template.getLocation();
-            try {
-                Node result = doProvision(template);
-                DcHealthTracker.recordSuccess(location);
-                TemplateErrorTracker.recordSuccess(template.getName());
-                return result;
-            } catch (HetznerProvisioningException e) {
-                lastException = e;
-                if (e.isRateLimited()) {
-                    // Rate limit is token-scoped, not DC-scoped. All DCs share
-                    // the same token; retrying another DC just wastes quota.
-                    HetznerApiClient client = HetznerApiClient.forCredentials(cloud.getCredentialsId());
-                    log.warn("Token rate-limited during provisioning of '{}' in DC {} "
-                            + "(remaining={}, resets in {}s), aborting failover",
-                            agent.getNodeName(), location,
-                            client.getRemaining(), client.timeUntilReset().toSeconds());
-                    throw e;
-                }
-                if (e.isConfigError()) {
-                    // Config errors are template-scoped, not DC-scoped.
-                    // Trying another DC with the same bad image/config won't help.
-                    TemplateErrorTracker.recordError(template.getName(), e.getMessage());
-                    log.warn("Template '{}' config error in DC {}: {} "
-                            + "(code={}, image={}). DC failover skipped; "
-                            + "check Hetzner changelog for image deprecation.",
-                            template.getName(), location, e.getMessage(),
-                            e.getHetznerErrorCode(), template.getImage());
-                    throw e;
-                }
-                DcHealthTracker.recordFailure(location);
-                if (e.isResourceUnavailable() && i < rankedTemplates.size() - 1) {
-                    log.warn("DC {} unavailable ({}), trying next DC ({}/{})",
-                            location, e.getHetznerErrorCode(),
-                            i + 1, rankedTemplates.size());
-                    continue;
-                }
-                // Non-retryable error or last template; give up
-                throw e;
+        try {
+            Computer computer = agent.getComputer();
+            if (computer != null && computer.isOnline()) {
+                return agent;
             }
+
+            // Try provisioning with failover across DCs
+            Exception lastException = null;
+            for (int i = 0; i < rankedTemplates.size(); i++) {
+                HetznerServerTemplate template = rankedTemplates.get(i);
+                String location = template.getLocation();
+                try {
+                    Node result = doProvision(template);
+                    DcHealthTracker.recordSuccess(location);
+                    TemplateErrorTracker.recordSuccess(template.getName());
+                    return result;
+                } catch (HetznerProvisioningException e) {
+                    lastException = e;
+                    if (e.isRateLimited()) {
+                        // Rate limit is token-scoped, not DC-scoped. All DCs share
+                        // the same token; retrying another DC just wastes quota.
+                        HetznerApiClient client = HetznerApiClient.forCredentials(cloud.getCredentialsId());
+                        log.warn("Token rate-limited during provisioning of '{}' in DC {} "
+                                + "(remaining={}, resets in {}s), aborting failover",
+                                agent.getNodeName(), location,
+                                client.getRemaining(), client.timeUntilReset().toSeconds());
+                        throw e;
+                    }
+                    if (e.isConfigError()) {
+                        // Config errors are template-scoped, not DC-scoped.
+                        // Trying another DC with the same bad image/config won't help.
+                        TemplateErrorTracker.recordError(template.getName(), e.getMessage());
+                        log.warn("Template '{}' config error in DC {}: {} "
+                                + "(code={}, image={}). DC failover skipped; "
+                                + "check Hetzner changelog for image deprecation.",
+                                template.getName(), location, e.getMessage(),
+                                e.getHetznerErrorCode(), template.getImage());
+                        throw e;
+                    }
+                    DcHealthTracker.recordFailure(location);
+                    if (e.isResourceUnavailable() && i < rankedTemplates.size() - 1) {
+                        log.warn("DC {} unavailable ({}), trying next DC ({}/{})",
+                                location, e.getHetznerErrorCode(),
+                                i + 1, rankedTemplates.size());
+                        continue;
+                    }
+                    // Non-retryable error or last template; give up
+                    throw e;
+                }
+            }
+            // Should not reach here, but just in case
+            throw lastException != null ? lastException
+                    : new IllegalStateException("No templates available for provisioning");
+        } finally {
+            // Decrement pending counter so subsequent cap checks are accurate.
+            // Must run on both success and failure paths.
+            cloud.provisionCompleted();
         }
-        // Should not reach here, but just in case
-        throw lastException != null ? lastException
-                : new IllegalStateException("No templates available for provisioning");
     }
 
     /**
