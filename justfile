@@ -69,6 +69,10 @@ backup inst:
 restore inst:
     ./scripts/restore.sh {{inst}}
 
+# Show recent Hetzner plugin logs from Jenkins system log
+logs inst n="30":
+    jenkins admin -i {{inst}} groovy -e 'def log = jenkins.model.Jenkins.instance.logRecords; def recs = log.findAll { it.loggerName?.contains("dnation") || it.loggerName?.contains("hetzner") }.take({{n}}); recs.each { r -> println "${new Date(r.millis).format("HH:mm:ss")} [${r.level}] ${r.loggerName?.tokenize(".")?.last()}: ${r.message?.take(200)}" }; println "---"; println "${recs.size()} of ${log.size()} system log records"'
+
 # Show DC circuit breaker health via Script Console
 dc-health inst:
     jenkins admin -i {{inst}} groovy -f scripts/dc-health-check.groovy
