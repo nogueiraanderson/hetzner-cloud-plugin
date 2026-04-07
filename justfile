@@ -69,9 +69,19 @@ backup inst:
 restore inst:
     ./scripts/restore.sh {{inst}}
 
-# Show recent cloud plugin logs (Hetzner + EC2 + provisioning) from Jenkins system log
-logs inst n="30":
-    jenkins admin -i {{inst}} groovy -e 'def keywords = ["dnation", "hetzner", "ec2", "EC2Cloud", "EC2Computer", "EC2Fleet", "NodeCallable", "HetznerCloud"]; def log = jenkins.model.Jenkins.instance.logRecords; def recs = log.findAll { r -> keywords.any { r.loggerName?.contains(it) || r.message?.contains(it) } }.take({{n}}); recs.each { r -> println "${new Date(r.millis).format("HH:mm:ss")} [${r.level}] ${r.loggerName?.tokenize(".")?.last()}: ${r.message?.take(200)}" }; println "---"; println "${recs.size()} of ${log.size()} system log records"'
+# Show recent cloud plugin logs from Jenkins system log
+# Usage: just logs <inst> [count] [filter]
+#   filter: all (default), hetzner, ec2
+logs inst n="30" filter="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{filter}}" in
+      hetzner) kw='["dnation", "hetzner", "HetznerCloud", "NodeCallable"]' ;;
+      ec2)     kw='["ec2", "EC2Cloud", "EC2Computer", "EC2Fleet"]' ;;
+      all)     kw='["dnation", "hetzner", "ec2", "EC2Cloud", "EC2Computer", "EC2Fleet", "NodeCallable", "HetznerCloud"]' ;;
+      *)       echo "Unknown filter: {{filter}} (use: all, hetzner, ec2)"; exit 1 ;;
+    esac
+    jenkins admin -i {{inst}} groovy -e "def kw = ${kw}; def log = jenkins.model.Jenkins.instance.logRecords; def recs = log.findAll { r -> kw.any { r.loggerName?.contains(it) || r.message?.contains(it) } }.take({{n}}); recs.each { r -> println \"\${new Date(r.millis).format('HH:mm:ss')} [\${r.level}] \${r.loggerName?.tokenize('.')?.last()}: \${r.message?.take(200)}\" }; println '---'; println \"\${recs.size()} of \${log.size()} system log records\""
 
 # Show DC circuit breaker health via Script Console
 dc-health inst:
