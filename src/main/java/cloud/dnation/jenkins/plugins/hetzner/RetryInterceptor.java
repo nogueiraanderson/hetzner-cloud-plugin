@@ -31,17 +31,24 @@ import java.util.concurrent.ThreadLocalRandom;
 class RetryInterceptor implements Interceptor {
 
     private static final int MAX_RETRIES = 3;
-    private static final long BASE_MS = 1_000;
     private static final double MULTIPLIER = 2.0;
-    private static final long CAP_MS = 30_000;
     // 429 is NOT retried here; RateLimitInterceptor handles it by blocking
     // further API calls until the rate-limit window resets.
     private static final Set<Integer> RETRYABLE_CODES = Set.of(502, 504);
 
     private final String credentialsId;
+    private final long baseMs;
+    private final long capMs;
 
     RetryInterceptor(String credentialsId) {
+        this(credentialsId, 1_000, 30_000);
+    }
+
+    // Package-visible for testing with fast retries
+    RetryInterceptor(String credentialsId, long baseMs, long capMs) {
         this.credentialsId = credentialsId;
+        this.baseMs = baseMs;
+        this.capMs = capMs;
     }
 
     @Override
@@ -105,10 +112,10 @@ class RetryInterceptor implements Interceptor {
     /**
      * Exponential backoff with full jitter (AWS-style).
      */
-    private static long calculateDelay(int attempt) {
-        double raw = BASE_MS * Math.pow(MULTIPLIER, attempt);
-        long capped = Math.min(CAP_MS, (long) raw);
-        return BASE_MS + (long) (ThreadLocalRandom.current().nextDouble() * (capped - BASE_MS));
+    private long calculateDelay(int attempt) {
+        double raw = baseMs * Math.pow(MULTIPLIER, attempt);
+        long capped = Math.min(capMs, (long) raw);
+        return baseMs + (long) (ThreadLocalRandom.current().nextDouble() * (capped - baseMs));
     }
 
     private static void sleep(long ms) {

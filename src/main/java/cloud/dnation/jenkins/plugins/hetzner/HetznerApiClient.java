@@ -132,7 +132,7 @@ class HetznerApiClient {
         return Duration.between(Instant.now(), until);
     }
 
-    void updateRateLimitState(int httpStatus, int limit, int remaining, long resetEpoch) {
+    void updateRateLimitState(int limit, int remaining) {
         if (limit > 0) {
             this.limit.set(limit);
         }

@@ -27,6 +27,7 @@ import retrofit2.Response;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -151,6 +152,36 @@ class HelperTest {
         HetznerProvisioningException exAuth = new HetznerProvisioningException(
                 "test", 401, "unauthorized", "fsn1");
         assertFalse(exAuth.isResourceUnavailable());
+    }
+
+    @Test
+    void testHetznerProvisioningException_isRateLimited() {
+        // HTTP 429 is rate-limited
+        HetznerProvisioningException ex429 = new HetznerProvisioningException(
+                "test", 429, null, "fsn1");
+        assertTrue(ex429.isRateLimited());
+
+        // rate_limit_exceeded error code (regardless of HTTP status)
+        HetznerProvisioningException exCode = new HetznerProvisioningException(
+                "test", 200, "rate_limit_exceeded", "fsn1");
+        assertTrue(exCode.isRateLimited());
+
+        // Normal error should NOT be rate-limited
+        HetznerProvisioningException ex500 = new HetznerProvisioningException(
+                "test", 500, "server_error", "fsn1");
+        assertFalse(ex500.isRateLimited());
+    }
+
+    @Test
+    void testHetznerProvisioningException_constructorWithCause() {
+        RuntimeException cause = new RuntimeException("root cause");
+        HetznerProvisioningException ex = new HetznerProvisioningException(
+                "msg", 422, "invalid_input", "fsn1", cause);
+        assertEquals("msg", ex.getMessage());
+        assertEquals(422, ex.getHttpStatus());
+        assertEquals("invalid_input", ex.getHetznerErrorCode());
+        assertEquals("fsn1", ex.getLocation());
+        assertSame(cause, ex.getCause());
     }
 
     @Test
