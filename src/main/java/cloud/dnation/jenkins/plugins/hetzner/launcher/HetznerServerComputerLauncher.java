@@ -141,11 +141,25 @@ public class HetznerServerComputerLauncher extends ComputerLauncher {
         });
     }
 
+    /**
+     * Progressive backoff interval for SSH retries.
+     * Attempts 1-3: 3s (sshd usually ready within seconds of "running").
+     * Attempts 4-6: 5s.
+     * Attempts 7-10: 10s.
+     */
+    private static int sshRetryInterval(int attempt) {
+        if (attempt <= 3) return 3;
+        if (attempt <= 6) return 5;
+        return 10;
+    }
+
     private Connection setupConnection(HetznerServerAgent node,
                                        Helper.LogAdapter logger,
                                        TaskListener taskListener) throws InterruptedException, AbortException {
-        int retries = 10;
-        while (!terminated.get() && retries-- > 0) {
+        final int maxAttempts = 10;
+        int attempt = 0;
+        while (!terminated.get() && attempt < maxAttempts) {
+            attempt++;
             final ServerDetail serverDetail = node.getServerInstance().getServerDetail();
             final String ipv4 = connector.getConnectionMethod().getAddress(serverDetail);
             final int port = connector.getSshPort();
@@ -171,11 +185,13 @@ public class HetznerServerComputerLauncher extends ComputerLauncher {
                     throw new AbortException("Authentication failed");
                 }
             } catch (IOException e) {
-                logger.error("Connection to " + ipv4 + " failed. Will wait 10 seconds before retry", e);
-                Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
+                int waitSeconds = sshRetryInterval(attempt);
+                logger.warn("Connection to " + ipv4 + " failed (attempt " + attempt + "/" + maxAttempts
+                        + "). Will wait " + waitSeconds + "s before next attempt", e);
+                Uninterruptibles.sleepUninterruptibly(waitSeconds, TimeUnit.SECONDS);
             }
         }
-        throw new AbortException("Failed to launch agent");
+        throw new AbortException("Failed to launch agent after " + maxAttempts + " attempts");
     }
 
     public void signalTermination() {

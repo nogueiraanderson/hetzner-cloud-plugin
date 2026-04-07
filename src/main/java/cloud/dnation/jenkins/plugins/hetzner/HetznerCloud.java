@@ -20,6 +20,7 @@ import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import com.google.common.primitives.Ints;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.Extension;
 import hudson.model.Computer;
 import hudson.model.Descriptor;
@@ -152,6 +153,8 @@ public class HetznerCloud extends AbstractCloudImpl {
     }
 
     @Override
+    @SuppressFBWarnings(value = "REC_CATCH_EXCEPTION",
+            justification = "Defensive catch prevents uncaught exceptions from killing CRW timer")
     public Collection<PlannedNode> provision(CloudState state, int excessWorkload) {
         log.debug("provision(cloud={},label={},excessWorkload={})", name, state.getLabel(), excessWorkload);
         final List<PlannedNode> plannedNodes = new ArrayList<>();

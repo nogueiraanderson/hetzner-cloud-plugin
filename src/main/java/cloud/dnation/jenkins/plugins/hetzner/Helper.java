@@ -136,7 +136,9 @@ public class Helper {
                     if (response.errorBody() != null) {
                         errorBody = response.errorBody().string();
                     }
-                } catch (java.io.IOException ignored) { }
+                } catch (java.io.IOException e) {
+                    errorBody = "<unreadable error body: " + e.getMessage() + ">";
+                }
                 String errorCode = parseHetznerErrorCode(errorBody);
                 throw new HetznerProvisioningException(
                         String.format("Hetzner API rate limited: HTTP 429, code=%s, body=%s",
@@ -184,6 +186,14 @@ public class Helper {
             logger.info(message);
             final LogRecord rec = new LogRecord(Level.INFO, message);
             rec.setLoggerName(logger.getName());
+            stream.println(FORMATTER.format(rec));
+        }
+
+        public void warn(String message, Throwable cause) {
+            logger.warn(message, cause);
+            final LogRecord rec = new LogRecord(Level.WARNING, message + " Cause: " + cause);
+            rec.setLoggerName(logger.getName());
+            rec.setThrown(cause);
             stream.println(FORMATTER.format(rec));
         }
 

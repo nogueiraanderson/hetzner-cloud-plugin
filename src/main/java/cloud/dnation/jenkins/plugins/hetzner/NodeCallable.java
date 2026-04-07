@@ -18,6 +18,7 @@ package cloud.dnation.jenkins.plugins.hetzner;
 import cloud.dnation.hetznerclient.ServerType;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.Uninterruptibles;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.model.Computer;
 import hudson.model.Node;
 import hudson.remoting.VirtualChannel;
@@ -90,7 +91,7 @@ class NodeCallable implements Callable<Node> {
                         // Config errors are template-scoped, not DC-scoped.
                         // Trying another DC with the same bad image/config won't help.
                         TemplateErrorTracker.recordError(template.getName(), e.getMessage());
-                        log.warn("Template '{}' config error in DC {}: {} "
+                        log.error("Template '{}' config error in DC {}: {} "
                                 + "(code={}, image={}). DC failover skipped; "
                                 + "check Hetzner changelog for image deprecation.",
                                 template.getName(), location, e.getMessage(),
@@ -122,11 +123,13 @@ class NodeCallable implements Callable<Node> {
      * Provision a single server using the given template.
      * Extracted from the original call() method for retry support.
      */
+    @SuppressFBWarnings(value = "REC_CATCH_EXCEPTION",
+            justification = "Broad catch ensures leaked servers are destroyed on any failure type")
     private Node doProvision(HetznerServerTemplate template) throws Exception {
         final HetznerServerInfo serverInfo = cloud.getResourceManager().createServer(agent);
-        agent.setServerInstance(serverInfo);
         final String serverName = serverInfo.getServerDetail().getName();
         try {
+            agent.setServerInstance(serverInfo);
             boolean running = false;
             final int bootDeadline = template.getBootDeadline();
             //wait for status == "running", but at most bootDeadline minutes
@@ -140,8 +143,8 @@ class NodeCallable implements Callable<Node> {
                     continue;
                 }
                 if (agent.isAlive()) {
-                    log.info("Server '{}' is now running, waiting 10 seconds before proceeding", serverName);
-                    Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
+                    log.info("Server '{}' is now running, waiting 3 seconds before proceeding", serverName);
+                    Uninterruptibles.sleepUninterruptibly(3, TimeUnit.SECONDS);
                     running = true;
                     break;
                 }
@@ -187,7 +190,7 @@ class NodeCallable implements Callable<Node> {
             log.error("Failed to bootstrap server '{}', attempting cleanup", serverName, e);
             try {
                 cloud.getResourceManager().destroyServer(serverInfo.getServerDetail());
-                log.info("Destroyed leaked server '{}'", serverName);
+                log.warn("Destroyed leaked server '{}'", serverName);
             } catch (Exception cleanupEx) {
                 log.error("Failed to destroy leaked server '{}' (id={}), manual cleanup required",
                         serverName, serverInfo.getServerDetail().getId(), cleanupEx);

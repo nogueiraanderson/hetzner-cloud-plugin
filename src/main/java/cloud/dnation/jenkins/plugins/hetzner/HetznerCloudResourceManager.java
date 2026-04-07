@@ -134,8 +134,8 @@ public class HetznerCloudResourceManager {
      */
     public static String getCacheStats() {
         return String.format(
-                "SSH_KEY_CACHE:  size=%d hits=%d misses=%d hitRate=%.1f%%\n"
-              + "LABEL_ID_CACHE: size=%d hits=%d misses=%d hitRate=%.1f%%\n"
+                "SSH_KEY_CACHE:  size=%d hits=%d misses=%d hitRate=%.1f%%%n"
+              + "LABEL_ID_CACHE: size=%d hits=%d misses=%d hitRate=%.1f%%%n"
               + "SERVER_LIST:    size=%d hits=%d misses=%d hitRate=%.1f%%",
                 SSH_KEY_CACHE.size(), SSH_KEY_CACHE.stats().hitCount(),
                 SSH_KEY_CACHE.stats().missCount(), SSH_KEY_CACHE.stats().hitRate() * 100,

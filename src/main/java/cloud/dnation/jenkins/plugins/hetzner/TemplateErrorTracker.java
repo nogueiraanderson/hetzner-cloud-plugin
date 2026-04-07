@@ -92,7 +92,8 @@ class TemplateErrorTracker {
             String status = state.isSuppressed()
                     ? "SUPPRESSED (until " + state.suppressedUntil + ")"
                     : "errors=" + state.consecutiveErrors;
-            sb.append(String.format("%-40s %s  last: %s%n", name, status,
+            sb.append(String.format("%-40s %s  lastAt: %s  last: %s%n", name, status,
+                    state.lastErrorAt != null ? state.lastErrorAt.toString() : "n/a",
                     state.lastError != null ? state.lastError.substring(0, Math.min(80, state.lastError.length())) : ""));
         });
         return sb.toString();
