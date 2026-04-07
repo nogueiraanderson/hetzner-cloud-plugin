@@ -53,9 +53,6 @@ class HetznerProvisioningException extends RuntimeException {
     }
 
     boolean isResourceUnavailable() {
-        if (httpStatus == 422) {
-            return true;
-        }
         if (hetznerErrorCode == null) {
             return false;
         }

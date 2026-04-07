@@ -2,9 +2,10 @@
  * OkHttp interceptor implementing retry with exponential backoff and jitter
  * for transient Hetzner API errors.
  *
- * Retry policy (matching hcloud-go official client):
- *   Retried:     429 (rate_limit_exceeded), 502, 504, network timeouts
- *   Not retried: 401, 403, 404, 409, 422, 500, 503, and all other codes
+ * Retry policy:
+ *   Retried:     502, 504, network timeouts
+ *   Not retried: 401, 403, 404, 409, 422, 429, 500, 503, and all other codes
+ *   Note: 429 is handled by RateLimitInterceptor (token-scoped block), not retried here.
  *
  * Backoff formula (AWS full jitter):
  *   raw   = base * multiplier^attempt
@@ -33,7 +34,9 @@ class RetryInterceptor implements Interceptor {
     private static final long BASE_MS = 1_000;
     private static final double MULTIPLIER = 2.0;
     private static final long CAP_MS = 30_000;
-    private static final Set<Integer> RETRYABLE_CODES = Set.of(429, 502, 504);
+    // 429 is NOT retried here; RateLimitInterceptor handles it by blocking
+    // further API calls until the rate-limit window resets.
+    private static final Set<Integer> RETRYABLE_CODES = Set.of(502, 504);
 
     private final String credentialsId;
 
@@ -61,7 +64,7 @@ class RetryInterceptor implements Interceptor {
                 }
 
                 // Retryable status code -- calculate backoff
-                long delay = calculateDelay(attempt, response);
+                long delay = calculateDelay(attempt);
                 log.warn("HTTP {} on {} {} [{}], retrying in {}ms (attempt {}/{})",
                         response.code(),
                         request.method(), request.url().encodedPath(),
@@ -73,7 +76,7 @@ class RetryInterceptor implements Interceptor {
                 if (attempt == MAX_RETRIES) {
                     break;
                 }
-                long delay = calculateDelay(attempt, null);
+                long delay = calculateDelay(attempt);
                 log.warn("Timeout on {} {} [{}], retrying in {}ms (attempt {}/{}): {}",
                         request.method(), request.url().encodedPath(),
                         credentialsId, delay, attempt + 1, MAX_RETRIES, e.getMessage());
@@ -101,25 +104,11 @@ class RetryInterceptor implements Interceptor {
 
     /**
      * Exponential backoff with full jitter (AWS-style).
-     * For 429 responses, uses max(calculated, Retry-After header).
      */
-    private static long calculateDelay(int attempt, Response response) {
+    private static long calculateDelay(int attempt) {
         double raw = BASE_MS * Math.pow(MULTIPLIER, attempt);
         long capped = Math.min(CAP_MS, (long) raw);
-        long jittered = BASE_MS + (long) (ThreadLocalRandom.current().nextDouble() * (capped - BASE_MS));
-
-        // For 429, honor Retry-After header as minimum
-        if (response != null && response.code() == 429) {
-            String retryAfter = response.header("Retry-After");
-            if (retryAfter != null) {
-                try {
-                    long retryMs = Long.parseLong(retryAfter.trim()) * 1000;
-                    jittered = Math.max(jittered, retryMs);
-                } catch (NumberFormatException ignored) { }
-            }
-        }
-
-        return jittered;
+        return BASE_MS + (long) (ThreadLocalRandom.current().nextDouble() * (capped - BASE_MS));
     }
 
     private static void sleep(long ms) {

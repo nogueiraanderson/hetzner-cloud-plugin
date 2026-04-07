@@ -121,10 +121,16 @@ class HelperTest {
 
     @Test
     void testHetznerProvisioningException_isResourceUnavailable() {
-        // 422 always means resource unavailable
-        HetznerProvisioningException ex422 = new HetznerProvisioningException(
+        // 422 without a recognized error code is NOT resource unavailable
+        HetznerProvisioningException ex422NoCode = new HetznerProvisioningException(
                 "test", 422, null, "fsn1");
-        assertTrue(ex422.isResourceUnavailable());
+        assertFalse(ex422NoCode.isResourceUnavailable());
+
+        // 422 with invalid_input is a config error, not resource unavailable
+        HetznerProvisioningException ex422Config = new HetznerProvisioningException(
+                "test", 422, "invalid_input", "fsn1");
+        assertFalse(ex422Config.isResourceUnavailable());
+        assertTrue(ex422Config.isConfigError());
 
         // resource_unavailable error code
         HetznerProvisioningException exCode = new HetznerProvisioningException(
@@ -136,7 +142,12 @@ class HelperTest {
                 "test", 409, "placement_error", "fsn1");
         assertTrue(exPlacement.isResourceUnavailable());
 
-        // Normal error (auth) should NOT be retryable
+        // server_limit_exceeded
+        HetznerProvisioningException exLimit = new HetznerProvisioningException(
+                "test", 403, "server_limit_exceeded", "fsn1");
+        assertTrue(exLimit.isResourceUnavailable());
+
+        // Normal error (auth) should NOT be resource unavailable
         HetznerProvisioningException exAuth = new HetznerProvisioningException(
                 "test", 401, "unauthorized", "fsn1");
         assertFalse(exAuth.isResourceUnavailable());

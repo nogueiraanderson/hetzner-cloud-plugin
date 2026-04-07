@@ -109,18 +109,20 @@ public class HetznerCloudResourceManager {
     }
 
     // --- Caches (static, shared across all HetznerCloudResourceManager instances) ---
+    // Keys are prefixed with credentialsId (Hetzner API token) to prevent cross-project collisions.
 
-    // SSH key: credentialsId -> SshKeyDetail. Keys are immutable after creation.
+    // SSH key: "htzCredId:sshCredId" -> SshKeyDetail. Keys are immutable after creation.
     private static final Cache<String, SshKeyDetail> SSH_KEY_CACHE =
             CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.MINUTES).maximumSize(50)
                     .recordStats().build();
 
-    // Label expression -> resource ID. Images/networks/firewalls/placement groups rarely change.
+    // Label expression: "htzCredId:labelExpr" -> resource ID. Images/networks/firewalls/placement groups rarely change.
     private static final Cache<String, Long> LABEL_ID_CACHE =
             CacheBuilder.newBuilder().expireAfterWrite(15, TimeUnit.MINUTES).maximumSize(200)
                     .recordStats().build();
 
     // Server list: cloudName -> List<ServerDetail>. Short TTL; invalidated on create/destroy.
+    // cloudName is unique per Jenkins cloud config, so no prefix needed.
     private static final Cache<String, List<ServerDetail>> SERVER_LIST_CACHE =
             CacheBuilder.newBuilder().expireAfterWrite(30, TimeUnit.SECONDS).maximumSize(20)
                     .recordStats().build();
@@ -232,8 +234,10 @@ public class HetznerCloudResourceManager {
             String labelExpression,
             Function<String, Call<R>> searchFunction,
             Function<R, List<I>> getItemsFunction) throws IOException {
-        // Check cache first (label->ID mappings are stable)
-        Long cachedId = LABEL_ID_CACHE.getIfPresent(labelExpression);
+        // Cache key includes Hetzner API credential to prevent cross-project collisions
+        final String cacheKey = credentialsId + ":" + labelExpression;
+
+        Long cachedId = LABEL_ID_CACHE.getIfPresent(cacheKey);
         if (cachedId != null) {
             log.debug("Label expression cache hit: '{}' -> {}", labelExpression, cachedId);
             return cachedId;
@@ -247,7 +251,7 @@ public class HetznerCloudResourceManager {
                 "No exact match found for expression '%s', results %d",
                 labelExpression, items.size());
         long id = Iterables.getOnlyElement(items).getId();
-        LABEL_ID_CACHE.put(labelExpression, id);
+        LABEL_ID_CACHE.put(cacheKey, id);
         log.debug("Label expression cached: '{}' -> {}", labelExpression, id);
         return id;
     }
@@ -330,11 +334,12 @@ public class HetznerCloudResourceManager {
      */
     private SshKeyDetail getOrCreateSshKey(HetznerServerTemplate template) throws IOException {
         final String sshCredId = template.getConnector().getSshCredentialsId();
+        final String cacheKey = credentialsId + ":" + sshCredId;
 
         // Check cache first (SSH keys are immutable after creation)
-        SshKeyDetail cached = SSH_KEY_CACHE.getIfPresent(sshCredId);
+        SshKeyDetail cached = SSH_KEY_CACHE.getIfPresent(cacheKey);
         if (cached != null) {
-            log.debug("SSH key cache hit for credentialsId={}", sshCredId);
+            log.debug("SSH key cache hit for {}", cacheKey);
             return cached;
         }
 
@@ -362,8 +367,8 @@ public class HetznerCloudResourceManager {
             result = assertValidResponse(createResponse, CreateSshKeyResponse::getSshKey);
         }
 
-        SSH_KEY_CACHE.put(sshCredId, result);
-        log.debug("SSH key cached for credentialsId={} (id={})", sshCredId, result.getId());
+        SSH_KEY_CACHE.put(cacheKey, result);
+        log.debug("SSH key cached for {} (id={})", cacheKey, result.getId());
         return result;
     }
 

@@ -54,8 +54,9 @@ class HetznerApiClient {
     // Rate-limit tracking (token-scoped)
     private final AtomicInteger limit = new AtomicInteger(3600);
     private final AtomicInteger remaining = new AtomicInteger(Integer.MAX_VALUE);
-    private final AtomicReference<Instant> resetAt = new AtomicReference<>(Instant.EPOCH);
-    private volatile boolean rateLimited = false;
+    // Single atomic timestamp: non-null means blocked until this instant.
+    // Replaces the old rateLimited+resetAt pair to eliminate the publication race.
+    private final AtomicReference<Instant> blockedUntil = new AtomicReference<>(null);
 
     private HetznerApiClient(String credentialsId) {
         this.credentialsId = credentialsId;
@@ -110,23 +111,25 @@ class HetznerApiClient {
     }
 
     boolean isRateLimited() {
-        if (!rateLimited) {
+        Instant until = blockedUntil.get();
+        if (until == null) {
             return false;
         }
-        if (Instant.now().isAfter(resetAt.get())) {
-            rateLimited = false;
-            log.info("Token rate-limit cleared, resuming API calls (credentialsId={})", credentialsId);
+        if (Instant.now().isAfter(until)) {
+            if (blockedUntil.compareAndSet(until, null)) {
+                log.info("Token rate-limit cleared, resuming API calls (credentialsId={})", credentialsId);
+            }
             return false;
         }
         return true;
     }
 
     Duration timeUntilReset() {
-        if (!isRateLimited()) {
+        Instant until = blockedUntil.get();
+        if (until == null || Instant.now().isAfter(until)) {
             return Duration.ZERO;
         }
-        Duration d = Duration.between(Instant.now(), resetAt.get());
-        return d.isNegative() ? Duration.ZERO : d;
+        return Duration.between(Instant.now(), until);
     }
 
     void updateRateLimitState(int httpStatus, int limit, int remaining, long resetEpoch) {
@@ -142,19 +145,17 @@ class HetznerApiClient {
                         remaining, currentLimit, credentialsId);
             }
         }
-        if (resetEpoch > 0) {
-            this.resetAt.set(Instant.ofEpochSecond(resetEpoch));
-        }
     }
 
     void recordRateLimit(long retryAfterSeconds) {
-        rateLimited = true;
-        Instant reset = retryAfterSeconds > 0
+        Instant fromRetryAfter = retryAfterSeconds > 0
                 ? Instant.now().plusSeconds(retryAfterSeconds)
                 : Instant.now().plusSeconds(60);
-        resetAt.set(reset);
-        log.warn("Token rate-limited (credentialsId={}). Blocking API calls for {}s (until {})",
-                credentialsId, retryAfterSeconds > 0 ? retryAfterSeconds : 60, reset);
+        // Advance blockedUntil to the latest known reset time (never shorten it)
+        blockedUntil.updateAndGet(current ->
+                current == null || fromRetryAfter.isAfter(current) ? fromRetryAfter : current);
+        log.warn("Token rate-limited (credentialsId={}). Blocking API calls until {}",
+                credentialsId, blockedUntil.get());
     }
 
     int getRemaining() {
