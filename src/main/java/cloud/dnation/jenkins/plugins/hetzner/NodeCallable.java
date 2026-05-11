@@ -189,7 +189,12 @@ class NodeCallable implements Callable<Node> {
     @SuppressFBWarnings(value = "REC_CATCH_EXCEPTION",
             justification = "Broad catch ensures leaked servers are destroyed on any failure type")
     private Node doProvision(HetznerServerTemplate template) throws Exception {
-        final HetznerServerInfo serverInfo = cloud.getResourceManager().createServer(agent);
+        // Pass the iteration template explicitly to createServer so DC failover
+        // actually targets a different DC/image/server-type. agent.getTemplate()
+        // is final and set to the FIRST ranked template; without this overload
+        // the failover loop is cosmetic - every iteration would create a server
+        // in the original DC regardless of which template the loop is on.
+        final HetznerServerInfo serverInfo = cloud.getResourceManager().createServer(agent, template);
         final String serverName = serverInfo.getServerDetail().getName();
         // Track Jenkins-side state for cleanup: a ghost node would block queue
         // routing if we destroyed the Hetzner server but left the Node entry.
