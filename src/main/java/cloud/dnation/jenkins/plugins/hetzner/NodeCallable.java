@@ -108,6 +108,18 @@ class NodeCallable implements Callable<Node> {
                                 cloud.name, template.getName(), "config_error").inc();
                         throw e;
                     }
+                    if ("instance_cap_reached".equals(e.getHetznerErrorCode())) {
+                        // Cloud-level capacity bookkeeping (HTTP 429 with our own
+                        // synthetic "instance_cap_reached" code from createServer's
+                        // under-lock cap recheck). Not a DC health signal: another
+                        // DC will hit the same cloud-wide cap. Skip DC failure
+                        // recording so capacity bursts don't poison healthy DCs.
+                        log.warn("Cloud cap reached during burst provisioning (location={}); "
+                                + "skipping DC health record and failover", location);
+                        HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
+                                cloud.name, template.getName(), "cap_reached_under_lock").inc();
+                        throw e;
+                    }
                     DcHealthTracker.recordFailure(location);
                     // Failover decision uses isPlausiblyDcAttributable() not the strict
                     // isResourceUnavailable() check. Hetzner introduces new error codes

@@ -289,6 +289,18 @@ public class HetznerServerTemplate extends AbstractDescribableImpl<HetznerServer
                 other.connector.getUsernameOverride())) {
             return false;
         }
+        // Connection method (IPv4 / IPv6 / private network) determines which
+        // address the launcher SSHes to. The agent's launcher is built from
+        // the original connector at construction; if the failover target
+        // switches connection method, the launcher would try the wrong
+        // address family for the freshly-created VM.
+        Class<?> thisCm = this.connector.getConnectionMethod() != null
+                ? this.connector.getConnectionMethod().getClass() : null;
+        Class<?> otherCm = other.connector.getConnectionMethod() != null
+                ? other.connector.getConnectionMethod().getClass() : null;
+        if (!java.util.Objects.equals(thisCm, otherCm)) {
+            return false;
+        }
         return true;
     }
 

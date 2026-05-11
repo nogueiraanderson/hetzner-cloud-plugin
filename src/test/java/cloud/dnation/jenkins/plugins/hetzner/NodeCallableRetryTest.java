@@ -274,6 +274,42 @@ class NodeCallableRetryTest {
     }
 
     /**
+     * Regression: cloud-cap exhaustion under burst is reported by the
+     * resource manager as HTTP 429 with synthetic code "instance_cap_reached".
+     * This is cap bookkeeping, not a DC health signal - all DCs share the
+     * same cap, so other DCs cannot help. We must NOT bump
+     * DcHealthTracker.recordFailure for this case; otherwise burst traffic
+     * would open the breaker for healthy DCs.
+     */
+    @Test
+    void instanceCapReachedDoesNotPoisonDcHealth() throws Exception {
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1");
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1");
+
+        HetznerCloud cloud = new HetznerCloud("hcloud-01", "mock-cred", "10",
+                Lists.newArrayList(t1, t2));
+
+        HetznerServerAgent agent = mock(HetznerServerAgent.class);
+        when(agent.getTemplate()).thenReturn(t1);
+        when(agent.getComputer()).thenReturn(null);
+
+        when(mgr.createServer(any(), any())).thenThrow(
+                new HetznerProvisioningException("Cap reached under lock", 429,
+                        "instance_cap_reached", "fsn1"));
+
+        List<HetznerServerTemplate> ranked = List.of(t1, t2);
+        NodeCallable callable = new NodeCallable(agent, cloud, ranked);
+
+        assertThrows(HetznerProvisioningException.class, callable::call);
+        // No DC failures recorded - cap is cloud-wide, not DC-scoped
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        // No failover either
+        verify(mgr, times(1)).createServer(any(), eq(t1));
+        verify(mgr, times(0)).createServer(any(), eq(t2));
+    }
+
+    /**
      * Regression: when the second ranked template has a different SSH
      * credential ID, failover must be REFUSED (because the agent embeds the
      * original template's launcher, which has the original credential). The
