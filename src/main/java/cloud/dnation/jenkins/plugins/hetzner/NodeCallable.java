@@ -113,7 +113,26 @@ class NodeCallable implements Callable<Node> {
                     // isResourceUnavailable() check. Hetzner introduces new error codes
                     // regularly; an unknown 422 or any 5xx is plausibly a DC issue and
                     // worth one retry on another DC before surfacing the failure.
+                    //
+                    // Additionally gate on isFailoverCompatibleWith(): the agent was
+                    // built from the FIRST ranked template, so swapping to a template
+                    // with different labels / connector / executors / remoteFs would
+                    // create a server whose Jenkins-side metadata is wrong (wrong SSH
+                    // credentials, wrong workspace, wrong queue matcher). When the next
+                    // template is incompatible we treat this as a final failure rather
+                    // than chasing more wrong-metadata bootstraps.
                     if (e.isPlausiblyDcAttributable() && i < rankedTemplates.size() - 1) {
+                        HetznerServerTemplate next = rankedTemplates.get(i + 1);
+                        HetznerServerTemplate baseline = agent.getTemplate();
+                        if (baseline != null && !baseline.isFailoverCompatibleWith(next)) {
+                            log.warn("DC failover from {} to {} aborted: template '{}' is not "
+                                    + "failover-compatible with '{}' (differs on labels/executors/"
+                                    + "remoteFs/mode/connector). Treating as final failure.",
+                                    location, next.getLocation(), baseline.getName(), next.getName());
+                            HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
+                                    cloud.name, template.getName(), "failover_incompatible").inc();
+                            throw e;
+                        }
                         String outcomeLabel = e.isResourceUnavailable() ? "dc_unavailable" : "dc_attributable";
                         log.warn("DC {} attributable failure ({}/{}), trying next DC ({}/{})",
                                 location, e.getHttpStatus(), e.getHetznerErrorCode(),
@@ -122,8 +141,7 @@ class NodeCallable implements Callable<Node> {
                                 cloud.name, template.getName(), outcomeLabel).inc();
                         HetznerMetricProvider.DC_FAILOVER.labels(
                                 location != null ? location : "",
-                                rankedTemplates.get(i + 1).getLocation() != null
-                                        ? rankedTemplates.get(i + 1).getLocation() : "").inc();
+                                next.getLocation() != null ? next.getLocation() : "").inc();
                         continue;
                     }
                     // Non-retryable error or last template; give up

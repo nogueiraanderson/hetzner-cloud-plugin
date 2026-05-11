@@ -273,9 +273,75 @@ class NodeCallableRetryTest {
         verify(mgr, times(1)).createServer(any(), any());
     }
 
+    /**
+     * Regression: when the second ranked template has a different SSH
+     * credential ID, failover must be REFUSED (because the agent embeds the
+     * original template's launcher, which has the original credential). The
+     * code logs and treats this as a final failure rather than churning a
+     * second VM that nobody can SSH into.
+     */
+    @Test
+    void failoverRefusedWhenTemplateIncompatible() throws Exception {
+        // t1 uses connector with credential "cred-A"; t2 uses "cred-B"
+        AbstractHetznerSshConnector connA = mock(AbstractHetznerSshConnector.class);
+        when(connA.getSshCredentialsId()).thenReturn("cred-A");
+        when(connA.getSshPort()).thenReturn(22);
+        AbstractHetznerSshConnector connB = mock(AbstractHetznerSshConnector.class);
+        when(connB.getSshCredentialsId()).thenReturn("cred-B");
+        when(connB.getSshPort()).thenReturn(22);
+
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1", connA);
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1", connB);
+
+        HetznerCloud cloud = new HetznerCloud("hcloud-01", "mock-cred", "10",
+                Lists.newArrayList(t1, t2));
+
+        HetznerServerAgent agent = mock(HetznerServerAgent.class);
+        when(agent.getTemplate()).thenReturn(t1);
+        when(agent.getComputer()).thenReturn(null);
+
+        when(mgr.createServer(any(), any())).thenThrow(
+                new HetznerProvisioningException("DC full", 422, "resource_unavailable", "fsn1"));
+
+        List<HetznerServerTemplate> ranked = List.of(t1, t2);
+        NodeCallable callable = new NodeCallable(agent, cloud, ranked);
+
+        HetznerProvisioningException ex = assertThrows(HetznerProvisioningException.class, callable::call);
+        assertEquals("fsn1", ex.getLocation());
+        // Critical: createServer must NOT have been called on t2 because the
+        // compatibility check refused failover.
+        verify(mgr, times(1)).createServer(any(), eq(t1));
+        verify(mgr, times(0)).createServer(any(), eq(t2));
+        // fsn1 failure is still recorded (the API call failed before the
+        // compatibility check refused failover).
+        assertEquals(1, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+    }
+
+    /**
+     * Shared connector for the failover tests so {@link
+     * HetznerServerTemplate#isFailoverCompatibleWith(HetznerServerTemplate)}
+     * returns true. Templates that differ only in DC/server-type/image are
+     * the canonical Percona pattern; the compatibility check refuses failover
+     * when connector identity differs, so each scenario must use the same
+     * connector instance.
+     */
+    private AbstractHetznerSshConnector sharedConnector() {
+        AbstractHetznerSshConnector c = mock(AbstractHetznerSshConnector.class);
+        when(c.getSshCredentialsId()).thenReturn("shared-cred");
+        when(c.getSshPort()).thenReturn(22);
+        when(c.getUsernameOverride()).thenReturn(null);
+        return c;
+    }
+
     private HetznerServerTemplate makeTemplate(String name, String location) {
+        return makeTemplate(name, location, sharedConnector());
+    }
+
+    private HetznerServerTemplate makeTemplate(String name, String location,
+                                               AbstractHetznerSshConnector connector) {
         HetznerServerTemplate t = new HetznerServerTemplate(name, "label1", "img1", location, "cpx32");
-        t.setConnector(mock(AbstractHetznerSshConnector.class));
+        t.setConnector(connector);
         return t;
     }
 }
