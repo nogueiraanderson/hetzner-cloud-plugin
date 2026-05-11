@@ -88,11 +88,26 @@ class NodeCallable implements Callable<Node> {
                         // no longer false-aborts failover.
                         HetznerApiClient client = HetznerApiClient.forCredentials(cloud.getCredentialsId());
                         log.warn("Token rate-limited during provisioning of '{}' in DC {} "
-                                + "(remaining={}, resets in {}s), aborting failover",
-                                agent.getNodeName(), location,
+                                + "(cloud={}, template={}, remaining={}, resets in {}s), aborting failover",
+                                agent.getNodeName(), location, cloud.name, template.getName(),
                                 client.getRemaining(), client.timeUntilReset().toSeconds());
                         HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
                                 cloud.name, template.getName(), "rate_limited").inc();
+                        throw e;
+                    }
+                    // Bare HTTP 429 with no/unrecognized error code: Hetzner
+                    // returned a throttling status without enough information
+                    // to classify it. Treat as token throttle (the dominant
+                    // cause of 429) rather than recording a DC failure.
+                    if (e.getHttpStatus() == 429
+                            && !"instance_cap_reached".equals(e.getHetznerErrorCode())) {
+                        log.warn("Unclassified HTTP 429 from Hetzner during provisioning of '{}' "
+                                + "(cloud={}, template={}, dc={}, code={}); treating as token "
+                                + "throttle, aborting failover",
+                                agent.getNodeName(), cloud.name, template.getName(), location,
+                                e.getHetznerErrorCode());
+                        HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
+                                cloud.name, template.getName(), "unclassified_throttle").inc();
                         throw e;
                     }
                     if (e.isConfigError()) {
@@ -114,8 +129,10 @@ class NodeCallable implements Callable<Node> {
                         // under-lock cap recheck). Not a DC health signal: another
                         // DC will hit the same cloud-wide cap. Skip DC failure
                         // recording so capacity bursts don't poison healthy DCs.
-                        log.warn("Cloud cap reached during burst provisioning (location={}); "
-                                + "skipping DC health record and failover", location);
+                        log.warn("Cloud cap reached during burst provisioning "
+                                + "(cloud={}, template={}, dc={}, node={}); skipping DC health "
+                                + "record and failover",
+                                cloud.name, template.getName(), location, agent.getNodeName());
                         HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
                                 cloud.name, template.getName(), "cap_reached_under_lock").inc();
                         throw e;
@@ -261,53 +278,47 @@ class NodeCallable implements Callable<Node> {
             Jenkins.get().addNode(agent);
             nodeAddedToJenkins = true;
             Computer computer = agent.toComputer();
-            int maxRetries = 5;
-            int attempt = 0;
-            boolean connected = false;
             if (computer != null) {
-                while (attempt < maxRetries) {
-                    attempt++;
-                    // Respect the per-attempt boot deadline so we don't keep retrying
-                    // SSH connect indefinitely after the launcher has already burnt
-                    // through the launcher-side retry budget. Without this, a wrong-arch
-                    // or sshd-never-up VM costs an extra ~50s before destroy.
-                    long remainingMs = waitStrategy.remainingMillis();
-                    if (remainingMs <= 0) {
-                        log.warn("Connection to '{}' aborted: boot deadline exceeded "
-                                + "(attempted {}/{})", computer.getDisplayName(), attempt, maxRetries);
-                        break;
-                    }
-                    // Cap each attempt to min(remaining, 60s) so a hung Future doesn't
-                    // block forever beyond the deadline. computer.connect(...).get()
-                    // was previously unbounded; a slow launcher could pin the
-                    // provisioning thread past bootDeadline.
-                    long attemptMs = Math.min(remainingMs, 60_000L);
-                    java.util.concurrent.Future<?> connectFuture = null;
-                    try {
-                        connectFuture = computer.connect(false);
-                        connectFuture.get(attemptMs, TimeUnit.MILLISECONDS);
-                        connected = true;
-                        break;
-                    } catch (java.util.concurrent.TimeoutException te) {
-                        log.warn("Connection to '{}' timed out after {}ms (attempt {}/{})",
-                                computer.getDisplayName(), attemptMs, attempt, maxRetries);
-                        if (connectFuture != null) {
-                            connectFuture.cancel(true);
-                        }
-                        // No sleep - the timeout already consumed wall-clock time
-                    } catch (InterruptedException | ExecutionException e) {
-                        log.warn("Connection to '{}' has failed (attempt {}/{})",
-                                computer.getDisplayName(), attempt, maxRetries, e);
-                        if (waitStrategy.remainingMillis() > 0) {
-                            TimeUnit.SECONDS.sleep(10);
-                        }
-                    }
-                }
-                if (!connected) {
+                // One bounded connect attempt with the full remaining boot
+                // budget. HetznerServerComputerLauncher already retries SSH
+                // internally; an OUTER retry loop with Future.cancel(true)
+                // risks leaving the prior launcher thread running while a
+                // new computer.connect() starts a second one in parallel.
+                // Codex review R2 finding: cancel(true) does not stop the
+                // launcher; the safe pattern is a single timed attempt and
+                // fail clean on timeout.
+                long remainingMs = waitStrategy.remainingMillis();
+                if (remainingMs <= 0) {
                     throw new IllegalStateException(String.format(
-                            "Failed to connect to '%s' after %d attempt(s) (boot deadline %s)",
-                            computer.getName(), attempt,
-                            waitStrategy.isDeadLineOver() ? "expired" : "remaining"));
+                            "Boot deadline expired before connect attempt for '%s' "
+                            + "(server id=%s, cloud=%s, template=%s, dc=%s)",
+                            computer.getName(), serverInfo.getServerDetail().getId(),
+                            cloud.name, template.getName(), template.getLocation()));
+                }
+                java.util.concurrent.Future<?> connectFuture = computer.connect(false);
+                try {
+                    connectFuture.get(remainingMs, TimeUnit.MILLISECONDS);
+                } catch (java.util.concurrent.TimeoutException te) {
+                    connectFuture.cancel(true);
+                    throw new IllegalStateException(String.format(
+                            "Connect to '%s' timed out after %dms "
+                            + "(server id=%s, cloud=%s, template=%s, dc=%s); "
+                            + "launcher cancelled, may briefly continue in background",
+                            computer.getName(), remainingMs,
+                            serverInfo.getServerDetail().getId(),
+                            cloud.name, template.getName(), template.getLocation()), te);
+                } catch (InterruptedException ie) {
+                    connectFuture.cancel(true);
+                    Thread.currentThread().interrupt();
+                    throw ie;
+                } catch (ExecutionException ee) {
+                    throw new IllegalStateException(String.format(
+                            "Connect to '%s' failed "
+                            + "(server id=%s, cloud=%s, template=%s, dc=%s)",
+                            computer.getName(),
+                            serverInfo.getServerDetail().getId(),
+                            cloud.name, template.getName(), template.getLocation()),
+                            ee.getCause() != null ? ee.getCause() : ee);
                 }
             } else {
                 throw new IllegalStateException(
@@ -319,20 +330,31 @@ class NodeCallable implements Callable<Node> {
 
             return agent;
         } catch (Exception e) {
-            log.error("Failed to bootstrap server '{}', attempting cleanup", serverName, e);
+            // WARN, not ERROR: a single bootstrap failure is a recoverable
+            // event (we destroy the VM, the autoscaler will replace). ERROR
+            // is reserved for cases where cleanup also failed and an operator
+            // needs to act. Codex review R2 logging finding.
+            log.warn("Failed to bootstrap server '{}' (id={}, cloud={}, template={}, dc={}); "
+                    + "attempting cleanup. Cause: {}",
+                    serverName, serverInfo.getServerDetail().getId(),
+                    cloud.name, template.getName(), template.getLocation(),
+                    e.getMessage());
             // destroyServer returns boolean: true on confirmed delete, false if
             // the underlying API call swallowed an exception. Branch metrics on
             // the actual outcome so PROVISION_LEAKED_SERVERS no longer over-
             // reports successful cleanups when Hetzner rejected the delete.
             boolean destroyed = cloud.getResourceManager().destroyServer(serverInfo.getServerDetail());
             if (destroyed) {
-                log.warn("Destroyed leaked server '{}'", serverName);
+                log.warn("Destroyed leaked server '{}' (id={}, cloud={}, template={}, dc={})",
+                        serverName, serverInfo.getServerDetail().getId(),
+                        cloud.name, template.getName(), template.getLocation());
                 HetznerMetricProvider.PROVISION_LEAKED_SERVERS
                         .labels(cloud.name, template.getName()).inc();
             } else {
-                log.error("Failed to destroy leaked server '{}' (id={}), manual cleanup required "
-                        + "(OrphanedNodesCleaner will retry)",
-                        serverName, serverInfo.getServerDetail().getId());
+                log.error("Failed to destroy leaked server '{}' (id={}, cloud={}, template={}, dc={}); "
+                        + "manual cleanup required (OrphanedNodesCleaner will retry)",
+                        serverName, serverInfo.getServerDetail().getId(),
+                        cloud.name, template.getName(), template.getLocation());
                 HetznerMetricProvider.PROVISION_LEAK_DESTROY_FAILURES
                         .labels(cloud.name, template.getName()).inc();
             }
@@ -391,7 +413,12 @@ class NodeCallable implements Callable<Node> {
         // would silently default to x86_64 instead of warning.
         String family = extractFamilyPrefix(serverType.toLowerCase(Locale.ROOT));
         if (family.isEmpty()) {
-            log.warn("Server type '{}' has no alphabetic prefix; defaulting to x86_64", serverType);
+            // Dedup even the empty-family path; an all-digit / leading-hyphen
+            // server type from misconfiguration should not flood logs.
+            if (WARNED_FAMILIES.putIfAbsent("<empty>", Boolean.TRUE) == null) {
+                log.warn("Server type '{}' has no alphabetic prefix; defaulting to x86_64 "
+                        + "(this warning is logged once per JVM)", serverType);
+            }
             return "x86_64";
         }
         if (KNOWN_ARM_PREFIXES.contains(family)) {
@@ -400,7 +427,11 @@ class NodeCallable implements Callable<Node> {
         if (KNOWN_X86_PREFIXES.contains(family)) {
             return "x86_64";
         }
-        if (WARNED_FAMILIES.putIfAbsent(family, Boolean.TRUE) == null) {
+        // Bound the dedup map to prevent unbounded growth from adversarial
+        // configs. 1024 distinct unknown families is far above any plausible
+        // legitimate set; beyond that we silently default without logging.
+        if (WARNED_FAMILIES.size() < 1024
+                && WARNED_FAMILIES.putIfAbsent(family, Boolean.TRUE) == null) {
             log.warn("Unknown Hetzner server type family '{}' (from '{}') - defaulting to x86_64. "
                     + "If this is an ARM family, update KNOWN_ARM_PREFIXES; the post-boot "
                     + "uname check is the safety net for now.", family, serverType);

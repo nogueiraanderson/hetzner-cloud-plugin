@@ -263,7 +263,12 @@ public class HetznerServerTemplate extends AbstractDescribableImpl<HetznerServer
         if (!java.util.Objects.equals(this.labelStr, other.labelStr)) {
             return false;
         }
-        if (!java.util.Objects.equals(this.remoteFs, other.remoteFs)) {
+        // Normalize remoteFs: null and empty string both fall through to the
+        // launcher default at agent-construction time, so they're equivalent
+        // for failover purposes.
+        if (!java.util.Objects.equals(
+                Strings.nullToEmpty(this.remoteFs),
+                Strings.nullToEmpty(other.remoteFs))) {
             return false;
         }
         if (this.mode != other.mode) {
@@ -282,7 +287,11 @@ public class HetznerServerTemplate extends AbstractDescribableImpl<HetznerServer
                 other.connector.getSshCredentialsId())) {
             return false;
         }
-        if (this.connector.getSshPort() != other.connector.getSshPort()) {
+        // Normalize sshPort: 0 is the unset sentinel and falls through to the
+        // default port (22) at runtime (see AbstractHetznerSshConnector.readResolve).
+        int thisPort = this.connector.getSshPort() == 0 ? 22 : this.connector.getSshPort();
+        int otherPort = other.connector.getSshPort() == 0 ? 22 : other.connector.getSshPort();
+        if (thisPort != otherPort) {
             return false;
         }
         if (!java.util.Objects.equals(this.connector.getUsernameOverride(),

@@ -57,6 +57,15 @@ public class HetznerPrometheusEndpoint implements UnprotectedRootAction {
     private static final boolean ALLOW_NON_LOOPBACK =
             Boolean.getBoolean("hetzner.prometheus.allowNonLoopback");
 
+    /**
+     * Rate-limit the "refused proxied request" WARN: a misconfigured proxy
+     * could otherwise spam a WARN on every Alloy scrape (10-30 lines/min).
+     * Allow at most one log per minute.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong LAST_PROXY_WARN_MS =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    private static final long PROXY_WARN_INTERVAL_MS = 60_000L;
+
     @Override
     @Nullable
     public String getIconFileName() {
@@ -132,10 +141,21 @@ public class HetznerPrometheusEndpoint implements UnprotectedRootAction {
         String forwarded = req.getHeader("Forwarded");
         String xRealIp = req.getHeader("X-Real-IP");
         if (xff != null || forwarded != null || xRealIp != null) {
-            log.warn("Refusing /hetzner-prometheus: peer is loopback but request carries "
-                    + "proxy headers (X-Forwarded-For='{}' Forwarded='{}' X-Real-IP='{}'). "
-                    + "If a trusted same-host proxy is intentional, set "
-                    + "-Dhetzner.prometheus.allowNonLoopback=true.", xff, forwarded, xRealIp);
+            long now = System.currentTimeMillis();
+            long last = LAST_PROXY_WARN_MS.get();
+            if (now - last >= PROXY_WARN_INTERVAL_MS
+                    && LAST_PROXY_WARN_MS.compareAndSet(last, now)) {
+                // Only header names (not values) to avoid leaking client IPs
+                // from misconfigured proxies into our logs.
+                log.warn("Refusing /hetzner-prometheus: peer is loopback but request carries "
+                        + "proxy headers (xff={} forwarded={} x_real_ip={}). "
+                        + "If a trusted same-host proxy is intentional, set "
+                        + "-Dhetzner.prometheus.allowNonLoopback=true. "
+                        + "(rate-limited to once per minute)",
+                        xff != null ? "present" : "absent",
+                        forwarded != null ? "present" : "absent",
+                        xRealIp != null ? "present" : "absent");
+            }
             return false;
         }
         return true;

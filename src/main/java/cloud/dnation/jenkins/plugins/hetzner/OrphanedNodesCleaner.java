@@ -120,8 +120,9 @@ public class OrphanedNodesCleaner extends PeriodicWork {
             if (reaped) {
                 HetznerMetricProvider.ORPHAN_REAPED.labels(cloud.name).inc();
             } else {
-                log.warn("Orphan termination failed for server {} (id={}); will retry on next cycle",
-                        serverDetail.getName(), serverDetail.getId());
+                log.warn("Orphan termination failed for server {} (id={}, cloud={}); "
+                        + "will retry on next cycle",
+                        serverDetail.getName(), serverDetail.getId(), cloud.name);
                 HetznerMetricProvider.ORPHAN_CLEANUP_ERRORS.labels(cloud.name, "destroy_failed").inc();
             }
         } catch (Exception e) {
