@@ -208,7 +208,7 @@ class NodeCallable implements Callable<Node> {
             double seconds = (System.nanoTime() - startNanos) / 1_000_000_000.0;
             String dc = template.getLocation() != null ? template.getLocation() : "";
             HetznerMetricProvider.PROVISION_DURATION
-                    .labels(template.getName(), dc, outcome).observe(seconds);
+                    .labels(cloud.name, template.getName(), dc, outcome).observe(seconds);
         }
     }
 
@@ -261,32 +261,53 @@ class NodeCallable implements Callable<Node> {
             Jenkins.get().addNode(agent);
             nodeAddedToJenkins = true;
             Computer computer = agent.toComputer();
-            int retry = 5;
+            int maxRetries = 5;
+            int attempt = 0;
             boolean connected = false;
             if (computer != null) {
-                while (--retry > 0) {
+                while (attempt < maxRetries) {
+                    attempt++;
                     // Respect the per-attempt boot deadline so we don't keep retrying
                     // SSH connect indefinitely after the launcher has already burnt
                     // through the launcher-side retry budget. Without this, a wrong-arch
                     // or sshd-never-up VM costs an extra ~50s before destroy.
-                    if (waitStrategy.isDeadLineOver()) {
+                    long remainingMs = waitStrategy.remainingMillis();
+                    if (remainingMs <= 0) {
                         log.warn("Connection to '{}' aborted: boot deadline exceeded "
-                                + "(remaining retries {})", computer.getDisplayName(), retry);
+                                + "(attempted {}/{})", computer.getDisplayName(), attempt, maxRetries);
                         break;
                     }
+                    // Cap each attempt to min(remaining, 60s) so a hung Future doesn't
+                    // block forever beyond the deadline. computer.connect(...).get()
+                    // was previously unbounded; a slow launcher could pin the
+                    // provisioning thread past bootDeadline.
+                    long attemptMs = Math.min(remainingMs, 60_000L);
+                    java.util.concurrent.Future<?> connectFuture = null;
                     try {
-                        computer.connect(false).get();
+                        connectFuture = computer.connect(false);
+                        connectFuture.get(attemptMs, TimeUnit.MILLISECONDS);
                         connected = true;
                         break;
+                    } catch (java.util.concurrent.TimeoutException te) {
+                        log.warn("Connection to '{}' timed out after {}ms (attempt {}/{})",
+                                computer.getDisplayName(), attemptMs, attempt, maxRetries);
+                        if (connectFuture != null) {
+                            connectFuture.cancel(true);
+                        }
+                        // No sleep - the timeout already consumed wall-clock time
                     } catch (InterruptedException | ExecutionException e) {
-                        log.warn("Connection to '{}' has failed, remaining retries {}",
-                                computer.getDisplayName(), retry, e);
-                        TimeUnit.SECONDS.sleep(10);
+                        log.warn("Connection to '{}' has failed (attempt {}/{})",
+                                computer.getDisplayName(), attempt, maxRetries, e);
+                        if (waitStrategy.remainingMillis() > 0) {
+                            TimeUnit.SECONDS.sleep(10);
+                        }
                     }
                 }
                 if (!connected) {
-                    throw new IllegalStateException(
-                            "Failed to connect to '" + computer.getName() + "' after 5 retries");
+                    throw new IllegalStateException(String.format(
+                            "Failed to connect to '%s' after %d attempt(s) (boot deadline %s)",
+                            computer.getName(), attempt,
+                            waitStrategy.isDeadLineOver() ? "expired" : "remaining"));
                 }
             } else {
                 throw new IllegalStateException(
@@ -318,13 +339,24 @@ class NodeCallable implements Callable<Node> {
             // Ghost-node prevention: addNode() may have succeeded before connect/
             // hardware-validation failed. If so, remove the Jenkins Node so it
             // doesn't sit around offline blocking queue routing for its labels.
-            if (nodeAddedToJenkins) {
+            // Also belt-and-suspenders: lookup by node name even when our flag
+            // says it wasn't added, because addNode() can mutate Jenkins state
+            // and then throw partway through save (Opus review M4).
+            String nodeName = agent.getNodeName();
+            boolean shouldTryRemove = nodeAddedToJenkins
+                    || (nodeName != null && Jenkins.get().getNode(nodeName) != null);
+            if (shouldTryRemove) {
                 try {
-                    Jenkins.get().removeNode(agent);
-                    log.warn("Removed Jenkins node '{}' after bootstrap failure", agent.getNodeName());
+                    // Re-resolve via Jenkins.getNode in case our `agent` reference
+                    // has been swapped or invalidated; tolerates already-removed.
+                    hudson.model.Node existing = Jenkins.get().getNode(nodeName);
+                    if (existing != null) {
+                        Jenkins.get().removeNode(existing);
+                        log.warn("Removed Jenkins node '{}' after bootstrap failure", nodeName);
+                    }
                 } catch (Exception removeEx) {
                     log.error("Failed to remove ghost Jenkins node '{}' after bootstrap failure; "
-                            + "manual cleanup may be required", agent.getNodeName(), removeEx);
+                            + "manual cleanup may be required", nodeName, removeEx);
                 }
             }
             throw e;
@@ -345,26 +377,44 @@ class NodeCallable implements Callable<Node> {
      */
     private static final java.util.Set<String> KNOWN_ARM_PREFIXES = java.util.Set.of("cax");
     private static final java.util.Set<String> KNOWN_X86_PREFIXES = java.util.Set.of("cx", "cpx", "ccx");
+    /** Dedup the "unknown family" warning to log at most once per family-per-JVM. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Boolean> WARNED_FAMILIES =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     static String inferArchFromServerType(String serverType) {
         if (serverType == null || serverType.isEmpty()) {
             return "x86_64";
         }
-        String lower = serverType.toLowerCase(Locale.ROOT);
-        for (String p : KNOWN_ARM_PREFIXES) {
-            if (lower.startsWith(p)) {
-                return "arm64";
-            }
+        // Extract the alphabetic family name up to the first digit. Earlier
+        // versions used startsWith() which incorrectly classified "cxx11" as
+        // "cx" (x86_64) - any future ARM family with a name like "cxg11"
+        // would silently default to x86_64 instead of warning.
+        String family = extractFamilyPrefix(serverType.toLowerCase(Locale.ROOT));
+        if (family.isEmpty()) {
+            log.warn("Server type '{}' has no alphabetic prefix; defaulting to x86_64", serverType);
+            return "x86_64";
         }
-        for (String p : KNOWN_X86_PREFIXES) {
-            if (lower.startsWith(p)) {
-                return "x86_64";
-            }
+        if (KNOWN_ARM_PREFIXES.contains(family)) {
+            return "arm64";
         }
-        log.warn("Unknown Hetzner server type prefix '{}' - defaulting to x86_64. "
-                + "If this is an ARM family, update KNOWN_ARM_PREFIXES; the post-boot "
-                + "uname check is the safety net for now.", serverType);
+        if (KNOWN_X86_PREFIXES.contains(family)) {
+            return "x86_64";
+        }
+        if (WARNED_FAMILIES.putIfAbsent(family, Boolean.TRUE) == null) {
+            log.warn("Unknown Hetzner server type family '{}' (from '{}') - defaulting to x86_64. "
+                    + "If this is an ARM family, update KNOWN_ARM_PREFIXES; the post-boot "
+                    + "uname check is the safety net for now.", family, serverType);
+        }
         return "x86_64";
+    }
+
+    /** Extracts the alphabetic prefix up to (but not including) the first digit. */
+    private static String extractFamilyPrefix(String s) {
+        int i = 0;
+        while (i < s.length() && Character.isLetter(s.charAt(i))) {
+            i++;
+        }
+        return s.substring(0, i);
     }
 
     /**
@@ -491,6 +541,12 @@ class NodeCallable implements Callable<Node> {
 
         boolean isDeadLineOver() {
             return System.nanoTime() > deadlineNanos;
+        }
+
+        /** Milliseconds left before the deadline, or 0 if already past. */
+        long remainingMillis() {
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            return remainingNanos <= 0 ? 0L : remainingNanos / 1_000_000L;
         }
 
         void waitNext() {

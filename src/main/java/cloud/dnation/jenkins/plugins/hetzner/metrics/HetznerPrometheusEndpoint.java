@@ -101,22 +101,43 @@ public class HetznerPrometheusEndpoint implements UnprotectedRootAction {
     }
 
     /**
-     * Returns true iff the request's remote address is a loopback IP.
-     * Uses {@link StaplerRequest2#getRemoteAddr()} which Stapler populates from
-     * the underlying servlet container. Behind a reverse proxy this is the
-     * proxy's address, so loopback-with-frontend-proxy works; X-Forwarded-For
-     * spoofing is irrelevant because we ignore that header.
+     * Returns true iff the request's immediate peer is a loopback IP AND there
+     * are no proxy/forwarded headers indicating this is a relayed request.
+     *
+     * Why both: a reverse proxy running on the same Jenkins host (nginx,
+     * Apache, the Jenkins-bundled connector forwarder, etc.) has a loopback
+     * peer address while delivering arbitrary external clients. Examining
+     * forwarded headers and bailing on their presence is the conservative
+     * choice; operators with a trusted proxy chain can set
+     * {@code -Dhetzner.prometheus.allowNonLoopback=true} to opt out.
      */
     private static boolean isLoopbackRequest(StaplerRequest2 req) {
         String remoteAddr = req.getRemoteAddr();
         if (remoteAddr == null || remoteAddr.isEmpty()) {
             return false;
         }
+        boolean peerIsLoopback;
         try {
-            return InetAddress.getByName(remoteAddr).isLoopbackAddress();
+            peerIsLoopback = InetAddress.getByName(remoteAddr).isLoopbackAddress();
         } catch (UnknownHostException e) {
             log.warn("Could not parse remote address '{}'; treating as non-loopback", remoteAddr);
             return false;
         }
+        if (!peerIsLoopback) {
+            return false;
+        }
+        // Reject any request that looks proxied. We don't try to parse and
+        // validate the forwarded chain; absence is the only safe signal.
+        String xff = req.getHeader("X-Forwarded-For");
+        String forwarded = req.getHeader("Forwarded");
+        String xRealIp = req.getHeader("X-Real-IP");
+        if (xff != null || forwarded != null || xRealIp != null) {
+            log.warn("Refusing /hetzner-prometheus: peer is loopback but request carries "
+                    + "proxy headers (X-Forwarded-For='{}' Forwarded='{}' X-Real-IP='{}'). "
+                    + "If a trusted same-host proxy is intentional, set "
+                    + "-Dhetzner.prometheus.allowNonLoopback=true.", xff, forwarded, xRealIp);
+            return false;
+        }
+        return true;
     }
 }
