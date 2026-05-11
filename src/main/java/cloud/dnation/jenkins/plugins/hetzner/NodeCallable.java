@@ -312,13 +312,25 @@ class NodeCallable implements Callable<Node> {
                     Thread.currentThread().interrupt();
                     throw ie;
                 } catch (ExecutionException ee) {
+                    // Unwrap IOException causes so the outer catch(IOException)
+                    // records a soft DC bootstrap failure for breaker tracking.
+                    // Codex review R3 finding: wrapping launcher IOException as
+                    // IllegalStateException routed every SSH/launcher failure
+                    // through catch(Exception other), which does NOT call
+                    // DcHealthTracker.recordFailure - so chronic DC-scoped
+                    // launcher rot could never trip the breaker.
+                    // AbortException extends IOException, so it is covered.
+                    Throwable cause = ee.getCause();
+                    if (cause instanceof java.io.IOException) {
+                        throw (java.io.IOException) cause;
+                    }
                     throw new IllegalStateException(String.format(
                             "Connect to '%s' failed "
                             + "(server id=%s, cloud=%s, template=%s, dc=%s)",
                             computer.getName(),
                             serverInfo.getServerDetail().getId(),
                             cloud.name, template.getName(), template.getLocation()),
-                            ee.getCause() != null ? ee.getCause() : ee);
+                            cause != null ? cause : ee);
                 }
             } else {
                 throw new IllegalStateException(
@@ -430,11 +442,21 @@ class NodeCallable implements Callable<Node> {
         // Bound the dedup map to prevent unbounded growth from adversarial
         // configs. 1024 distinct unknown families is far above any plausible
         // legitimate set; beyond that we silently default without logging.
-        if (WARNED_FAMILIES.size() < 1024
-                && WARNED_FAMILIES.putIfAbsent(family, Boolean.TRUE) == null) {
-            log.warn("Unknown Hetzner server type family '{}' (from '{}') - defaulting to x86_64. "
-                    + "If this is an ARM family, update KNOWN_ARM_PREFIXES; the post-boot "
-                    + "uname check is the safety net for now.", family, serverType);
+        // Insert-then-check (rather than check-then-insert) so a burst of
+        // concurrent unknown families cannot all race past size() < 1024 and
+        // collectively push the map past the cap (Codex review R3 finding).
+        if (WARNED_FAMILIES.putIfAbsent(family, Boolean.TRUE) == null) {
+            if (WARNED_FAMILIES.size() <= 1024) {
+                log.warn("Unknown Hetzner server type family '{}' (from '{}') - defaulting to x86_64. "
+                        + "If this is an ARM family, update KNOWN_ARM_PREFIXES; the post-boot "
+                        + "uname check is the safety net for now.", family, serverType);
+            } else {
+                // Insertion pushed us past the cap. Remove our entry so the
+                // map stays bounded and a slot remains for a real future
+                // unknown. The same family hitting this path again will
+                // simply be silently defaulted.
+                WARNED_FAMILIES.remove(family);
+            }
         }
         return "x86_64";
     }
