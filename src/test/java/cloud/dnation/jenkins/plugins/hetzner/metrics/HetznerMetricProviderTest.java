@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -536,7 +537,20 @@ class HetznerMetricProviderTest {
     }
 
     @Test
+    void alwaysEmitArchsExcludesUnknown() {
+        // v24: only amd64/arm64 are zero-emitted every refresh. unknown is
+        // lazy: it appears in Mimir only after a non-canonical SKU has
+        // actually been observed at least once on the cloud.
+        assertTrue(HetznerMetricProvider.ALWAYS_EMIT_ARCHS.contains(HetznerMetricProvider.ARCH_AMD64));
+        assertTrue(HetznerMetricProvider.ALWAYS_EMIT_ARCHS.contains(HetznerMetricProvider.ARCH_ARM64));
+        assertFalse(HetznerMetricProvider.ALWAYS_EMIT_ARCHS.contains(HetznerMetricProvider.ARCH_UNKNOWN));
+        assertEquals(2, HetznerMetricProvider.ALWAYS_EMIT_ARCHS.size());
+    }
+
+    @Test
     void knownArchsCoversAllEmittedValues() {
+        // KNOWN_ARCHS is the full catalogue (used by reset helpers and tests
+        // that want to enumerate every label value the plugin might emit).
         assertTrue(HetznerMetricProvider.KNOWN_ARCHS.contains(HetznerMetricProvider.ARCH_AMD64));
         assertTrue(HetznerMetricProvider.KNOWN_ARCHS.contains(HetznerMetricProvider.ARCH_ARM64));
         assertTrue(HetznerMetricProvider.KNOWN_ARCHS.contains(HetznerMetricProvider.ARCH_UNKNOWN));
