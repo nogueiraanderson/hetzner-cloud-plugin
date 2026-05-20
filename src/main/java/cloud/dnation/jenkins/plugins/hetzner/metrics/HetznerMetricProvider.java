@@ -769,10 +769,24 @@ public final class HetznerMetricProvider {
     public static final String ARCH_UNKNOWN = "unknown";
 
     /**
-     * Stable enumeration of arch label values the plugin emits. Used by
-     * callers that need to clear stale series (e.g. when an arch drops to
-     * zero, the gauge must be explicitly set to 0 rather than left at its
-     * last value).
+     * Arch label values the plugin always emits on every refresh pass, even
+     * when their bucket is empty. Forces zero-emission so a gauge that drops
+     * from N to 0 does not pin at its last non-zero value in Mimir.
+     *
+     * <p>Only {@link #ARCH_AMD64} and {@link #ARCH_ARM64} qualify: those are
+     * the entire fleet today and the zero-emission story is desirable on both.
+     * {@link #ARCH_UNKNOWN} is deliberately excluded -- callers should
+     * lazy-emit it only after observing a non-canonical SKU, otherwise a
+     * permanent {@code arch="unknown"} = 0 series is constant background
+     * noise (and a false signal to any alert that watches "unknown > 0").
+     */
+    public static final java.util.List<String> ALWAYS_EMIT_ARCHS = java.util.List.of(
+            ARCH_AMD64, ARCH_ARM64);
+
+    /**
+     * The full catalogue including the lazily-emitted {@link #ARCH_UNKNOWN}.
+     * Useful in tests and for any caller that needs to iterate the entire
+     * label-value universe (e.g. to clear all series in {@code resetForTest}).
      */
     public static final java.util.List<String> KNOWN_ARCHS = java.util.List.of(
             ARCH_AMD64, ARCH_ARM64, ARCH_UNKNOWN);

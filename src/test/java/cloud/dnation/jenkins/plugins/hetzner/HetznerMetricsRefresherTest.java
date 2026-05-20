@@ -128,9 +128,9 @@ class HetznerMetricsRefresherTest {
     /**
      * v103.percona.23: running servers are emitted per arch derived from
      * Hetzner serverType (cpx* -> amd64, cax* -> arm64). Verifies the
-     * grouping logic plus the explicit zero-emission for archs with no
-     * running servers (otherwise stale series pin to their last non-zero
-     * value in Mimir).
+     * grouping logic plus the explicit zero-emission for the always-emit
+     * archs (otherwise stale series pin to their last non-zero value in
+     * Mimir).
      */
     @Test
     void refreshMetrics_splitsByArch() throws Exception {
@@ -148,12 +148,62 @@ class HetznerMetricsRefresherTest {
                 .labels("hcloud-test", HetznerMetricProvider.ARCH_AMD64).get();
         double arm = HetznerMetricProvider.RUNNING_SERVERS
                 .labels("hcloud-test", HetznerMetricProvider.ARCH_ARM64).get();
-        double unknown = HetznerMetricProvider.RUNNING_SERVERS
-                .labels("hcloud-test", HetznerMetricProvider.ARCH_UNKNOWN).get();
         assertEquals(3.0, amd, 0.0001, "3 cpx* servers -> amd64");
         assertEquals(1.0, arm, 0.0001, "1 cax* server -> arm64");
-        assertEquals(0.0, unknown, 0.0001,
-                "no unrecognised serverType -> the unknown bucket must be set to 0, not left stale");
+        // unknown is lazily emitted; without an unknown observation it
+        // should NOT appear as a series at all. Probe via the registry to
+        // distinguish "absent" from "present at 0".
+        Double unknownSample = io.prometheus.client.CollectorRegistry.defaultRegistry
+                .getSampleValue("hetzner_running_servers",
+                        new String[]{"cloud", "arch"},
+                        new String[]{"hcloud-test", HetznerMetricProvider.ARCH_UNKNOWN});
+        org.junit.jupiter.api.Assertions.assertNull(unknownSample,
+                "no unrecognised serverType seen yet -> arch=\"unknown\" must NOT appear in Mimir");
+    }
+
+    /**
+     * v103.percona.24: arch="unknown" is lazily emitted. On first observation
+     * of a non-canonical SKU the series appears; on subsequent passes where
+     * the unknown server is gone, the series persists at 0 (so dashboards
+     * still see it -- it's a recent-incident marker). The always-emit set
+     * (amd64, arm64) is unaffected.
+     */
+    @Test
+    void refreshMetrics_lazilyEmitsUnknownArchOnceObserved() throws Exception {
+        HetznerCloud cloud = new HetznerCloud("hcloud-test", "mock-creds", "10", new ArrayList<>());
+
+        // Pass 1: only canonical SKUs. unknown series must not exist.
+        when(rsrcMgr.fetchAllServers(anyString())).thenReturn(java.util.List.of(
+                serverWithType("cpx42"), serverWithType("cax31")));
+        cloud.refreshMetrics();
+        org.junit.jupiter.api.Assertions.assertNull(probeUnknown("hcloud-test"),
+                "pass 1: no unknown SKU observed -> arch=\"unknown\" must be absent");
+
+        // Pass 2: a non-canonical SKU appears. unknown series materialises.
+        when(rsrcMgr.fetchAllServers(anyString())).thenReturn(java.util.List.of(
+                serverWithType("cpx42"), serverWithType("zzz99")));
+        cloud.refreshMetrics();
+        Double afterAppearance = probeUnknown("hcloud-test");
+        org.junit.jupiter.api.Assertions.assertNotNull(afterAppearance,
+                "pass 2: unknown SKU observed -> arch=\"unknown\" must now appear in Mimir");
+        assertEquals(1.0, afterAppearance, 0.0001, "unknown bucket counts 1 server");
+
+        // Pass 3: unknown server gone. Series persists at 0 (we have seen it).
+        when(rsrcMgr.fetchAllServers(anyString())).thenReturn(java.util.List.of(
+                serverWithType("cpx42")));
+        cloud.refreshMetrics();
+        Double afterDisappearance = probeUnknown("hcloud-test");
+        org.junit.jupiter.api.Assertions.assertNotNull(afterDisappearance,
+                "pass 3: unknown previously observed -> series must persist at zero, not vanish");
+        assertEquals(0.0, afterDisappearance, 0.0001,
+                "unknown count returns to zero but series stays for stale-incident visibility");
+    }
+
+    private static Double probeUnknown(String cloudName) {
+        return io.prometheus.client.CollectorRegistry.defaultRegistry.getSampleValue(
+                "hetzner_running_servers",
+                new String[]{"cloud", "arch"},
+                new String[]{cloudName, HetznerMetricProvider.ARCH_UNKNOWN});
     }
 
     /**
@@ -218,12 +268,21 @@ class HetznerMetricsRefresherTest {
     /**
      * Read the running-servers gauge regardless of how many arch buckets it
      * is split across. Used by tests that care about the cloud-wide total
-     * but not the per-arch breakdown.
+     * but not the per-arch breakdown. Uses the registry-level sample lookup
+     * so it does NOT auto-instantiate a Child for an arch the plugin has
+     * not actually emitted yet (which would defeat the v24 lazy-unknown
+     * behavior).
      */
     private static double sumRunningAcrossArchs(String cloudName) {
         double sum = 0;
         for (String arch : HetznerMetricProvider.KNOWN_ARCHS) {
-            sum += HetznerMetricProvider.RUNNING_SERVERS.labels(cloudName, arch).get();
+            Double v = io.prometheus.client.CollectorRegistry.defaultRegistry.getSampleValue(
+                    "hetzner_running_servers",
+                    new String[]{"cloud", "arch"},
+                    new String[]{cloudName, arch});
+            if (v != null) {
+                sum += v;
+            }
         }
         return sum;
     }

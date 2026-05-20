@@ -150,6 +150,20 @@ public class HetznerCloud extends AbstractCloudImpl {
         return resourceManager;
     }
 
+    /**
+     * Arch label values this cloud has observed at least once on a non-empty
+     * server set, beyond the always-emit set. The point is to make
+     * {@code arch="unknown"} a lazy signal rather than constant background
+     * noise: it never appears in Mimir until the plugin actually sees a
+     * non-canonical Hetzner SKU, but once observed it keeps re-emitting
+     * (zero if currently empty) so the series does not pin at its last
+     * non-zero value. Cleared at JVM restart, which is the right cadence
+     * (a strange-SKU incident two weeks ago is no longer relevant if the
+     * fleet has been clean ever since).
+     */
+    private final transient java.util.Set<String> seenArchExtras =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     @SneakyThrows
     private int runningNodeCount() {
         // Note: if fetchAllServers() throws (rate-limit, network blip), the
@@ -158,13 +172,13 @@ public class HetznerCloud extends AbstractCloudImpl {
         // gap that breaks alerts. Persistent staleness is detectable as a
         // flat-line on the dashboard.
         //
-        // v23+: group running VMs by arch (cpx* -> amd64, cax* -> arm64,
-        // unknown SKU -> unknown). Every entry in KNOWN_ARCHS is emitted
-        // even when its count is zero; otherwise an arch that drops from
-        // N to 0 would keep its stale series in Mimir at the last-known
-        // non-zero value, breaking ratio panels and alerts. The dimension
-        // is collapsible at query time (sum by(cloud)) so pre-v23
-        // dashboards keep working unchanged.
+        // v23+: group running VMs by arch (cpx*/cx*/ccx* -> amd64,
+        // cax* -> arm64, anything else -> unknown). amd64 and arm64 are
+        // always emitted (even at zero) so a bucket that drops from N to 0
+        // doesn't pin at its last non-zero value in Mimir. "unknown" is
+        // lazily emitted only after it has actually been observed at least
+        // once on this cloud (see seenArchExtras), so dashboards stay quiet
+        // until something is genuinely worth flagging.
         java.util.Map<String, Long> byArch = getResourceManager().fetchAllServers(name)
                 .stream()
                 .filter(sd -> HetznerConstants.RUNNABLE_STATE_SET.contains(sd.getStatus()))
@@ -172,8 +186,23 @@ public class HetznerCloud extends AbstractCloudImpl {
                         sd -> HetznerMetricProvider.archOf(
                                 sd.getServerType() != null ? sd.getServerType().getName() : null),
                         java.util.stream.Collectors.counting()));
+        // Promote any newly observed non-canonical arch into the
+        // seenArchExtras set so subsequent passes keep emitting it (at zero
+        // or otherwise). Only non-zero observations matter; a strict zero
+        // for an arch we've never seen would create the very noise we are
+        // trying to avoid.
+        byArch.forEach((arch, count) -> {
+            if (count > 0 && !HetznerMetricProvider.ALWAYS_EMIT_ARCHS.contains(arch)) {
+                seenArchExtras.add(arch);
+            }
+        });
         int total = 0;
-        for (String arch : HetznerMetricProvider.KNOWN_ARCHS) {
+        for (String arch : HetznerMetricProvider.ALWAYS_EMIT_ARCHS) {
+            long c = byArch.getOrDefault(arch, 0L);
+            HetznerMetricProvider.RUNNING_SERVERS.labels(name, arch).set(c);
+            total += Ints.checkedCast(c);
+        }
+        for (String arch : seenArchExtras) {
             long c = byArch.getOrDefault(arch, 0L);
             HetznerMetricProvider.RUNNING_SERVERS.labels(name, arch).set(c);
             total += Ints.checkedCast(c);

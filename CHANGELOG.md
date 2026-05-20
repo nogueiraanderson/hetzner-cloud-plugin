@@ -2,6 +2,25 @@
 
 All notable Percona patches to [hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) are documented here.
 
+## v103.percona.24 (2026-05-20)
+
+Trims the `arch="unknown"` series so it only appears when a non-canonical Hetzner SKU is actually observed, rather than being emitted as a constant `0` on every refresh. v23 deployed to ps3 showed `hetzner_running_servers{arch="unknown"} 0` permanently, which is background noise and a false signal for any alert that watches `unknown > 0`.
+
+### Changed
+
+- `HetznerMetricProvider.ALWAYS_EMIT_ARCHS` (new) replaces `KNOWN_ARCHS` as the iteration target in `HetznerCloud.runningNodeCount()`. Holds only `amd64` and `arm64` so those two get explicit zero-emission on every pass. `KNOWN_ARCHS` is kept as the full three-value catalogue for test/reset helpers.
+- `HetznerCloud` now tracks a per-instance `seenArchExtras` set (`ConcurrentHashMap.newKeySet()`). On each refresh, any non-canonical arch observed with a non-zero count is promoted into the set; subsequent passes keep emitting that arch (zero or otherwise) so a recent-incident marker persists for the JVM's lifetime. Cleared at restart, which is the right cadence (a strange-SKU incident weeks ago is not load-bearing if the fleet has been clean since).
+
+### Tests
+
+- `HetznerMetricsRefresherTest.refreshMetrics_splitsByArch` now asserts that `arch="unknown"` is absent from the registry when no unknown SKU has been observed (`getSampleValue` returns null), rather than asserting `0`.
+- New `refreshMetrics_lazilyEmitsUnknownArchOnceObserved` walks the three-pass lifecycle: clean → unknown observed → unknown gone (series persists at 0).
+- New `alwaysEmitArchsExcludesUnknown` pin in `HetznerMetricProviderTest`.
+
+### Compatibility
+
+- Backward compatible with v23 dashboards: aggregations across `arch` are unchanged. Panels that explicitly select `arch="unknown"` will get `no data` until an unknown SKU appears, which is the desired behavior.
+
 ## v103.percona.23 (2026-05-20)
 
 Adds an `arch` label (`amd64` / `arm64` / `unknown`) to the two Hetzner-side metrics that carry per-server context, so the Grafana dashboard can split worker activity by CPU architecture. The Hetzner serverType naming convention is unambiguous: `cpx*` / `cx*` / `ccx*` are AMD64, `cax*` is ARM64. Everything else collapses to `unknown` so cardinality stays bounded if Hetzner adds a new SKU prefix.
