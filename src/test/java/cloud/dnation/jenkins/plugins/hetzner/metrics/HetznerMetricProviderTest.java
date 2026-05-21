@@ -198,23 +198,24 @@ class HetznerMetricProviderTest {
 
     @Test
     void dcBreakerStateGaugeReflectsOrdinal() {
-        HetznerMetricProvider.DC_BREAKER_STATE.labels("fsn1").set(1); // OPEN
-        assertEquals(1.0, sample("hetzner_dc_circuit_breaker_state", "location", "fsn1"));
+        HetznerMetricProvider.DC_BREAKER_STATE.labels("fsn1", "amd64").set(1); // OPEN
+        assertEquals(1.0, sample("hetzner_dc_circuit_breaker_state",
+                new String[]{"location", "arch"}, new String[]{"fsn1", "amd64"}));
     }
 
     @Test
     void dcBreakerTransitionCounterIncrements() {
-        HetznerMetricProvider.DC_BREAKER_TRANSITIONS.labels("fsn1", "CLOSED", "OPEN").inc();
+        HetznerMetricProvider.DC_BREAKER_TRANSITIONS.labels("fsn1", "amd64", "CLOSED", "OPEN").inc();
         assertEquals(1.0, sample("hetzner_dc_circuit_breaker_transitions_total",
-                new String[]{"location", "from", "to"},
-                new String[]{"fsn1", "CLOSED", "OPEN"}));
+                new String[]{"location", "arch", "from", "to"},
+                new String[]{"fsn1", "amd64", "CLOSED", "OPEN"}));
     }
 
     @Test
     void dcBreakerConsecutiveFailuresGaugeReflectsSet() {
-        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels("fsn1").set(5);
+        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels("fsn1", "amd64").set(5);
         assertEquals(5.0, sample("hetzner_dc_circuit_breaker_consecutive_failures",
-                "location", "fsn1"));
+                new String[]{"location", "arch"}, new String[]{"fsn1", "amd64"}));
     }
 
     @Test

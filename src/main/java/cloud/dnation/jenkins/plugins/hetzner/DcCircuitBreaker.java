@@ -20,21 +20,27 @@ class DcCircuitBreaker {
     private static final long RESET_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
     // Not final: XStream deserialization assigns fields directly, and
-    // afterLoad() may fill in a fallback location from the persisted map key
-    // if older XML omitted it.
+    // afterLoad() may fill in a fallback location/arch from the persisted
+    // map key if older XML omitted them.
     @Getter
     private String location;
+    // v103.percona.25: per-arch breaker key. One of {amd64, arm64, unknown}
+    // via HetznerMetricProvider.archOf(). Legacy XML (pre-v25) lacks this
+    // field; afterLoad() fills it from the decoded map key on first load.
+    @Getter
+    private String arch;
     private State state = State.CLOSED;
     private int consecutiveFailures = 0;
     private long openedAt = 0;
     private long lastSuccessAt = System.currentTimeMillis();
     private long lastFailureAt = 0;
 
-    DcCircuitBreaker(String location) {
+    DcCircuitBreaker(String location, String arch) {
         this.location = location;
+        this.arch = arch;
         // Initialize gauge with starting state so panels render immediately
         // instead of "no data" until the first transition.
-        HetznerMetricProvider.DC_BREAKER_STATE.labels(location).set(State.CLOSED.ordinal());
+        HetznerMetricProvider.DC_BREAKER_STATE.labels(location, arch).set(State.CLOSED.ordinal());
     }
 
     /**
@@ -43,8 +49,8 @@ class DcCircuitBreaker {
      * recordFailure open, getState lazy reset).
      */
     private void recordTransition(State from, State to) {
-        HetznerMetricProvider.DC_BREAKER_STATE.labels(location).set(to.ordinal());
-        HetznerMetricProvider.DC_BREAKER_TRANSITIONS.labels(location, from.name(), to.name()).inc();
+        HetznerMetricProvider.DC_BREAKER_STATE.labels(location, arch).set(to.ordinal());
+        HetznerMetricProvider.DC_BREAKER_TRANSITIONS.labels(location, arch, from.name(), to.name()).inc();
     }
 
     /**
@@ -80,10 +86,11 @@ class DcCircuitBreaker {
         state = State.CLOSED;
         lastSuccessAt = System.currentTimeMillis();
         if (previous != State.CLOSED) {
-            log.info("DC {} circuit breaker: {} -> CLOSED (provisioning succeeded)", location, previous);
+            log.info("DC {} arch {} circuit breaker: {} -> CLOSED (provisioning succeeded)",
+                    location, arch, previous);
             recordTransition(previous, State.CLOSED);
         }
-        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels(location).set(0);
+        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels(location, arch).set(0);
     }
 
     /**
@@ -93,23 +100,23 @@ class DcCircuitBreaker {
     synchronized void recordFailure() {
         consecutiveFailures++;
         lastFailureAt = System.currentTimeMillis();
-        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels(location).set(consecutiveFailures);
+        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels(location, arch).set(consecutiveFailures);
         if (state == State.HALF_OPEN) {
             // Probe failed, go back to OPEN
             state = State.OPEN;
             openedAt = System.currentTimeMillis();
-            log.warn("DC {} circuit breaker: HALF_OPEN -> OPEN (probe failed, {} consecutive failures)",
-                    location, consecutiveFailures);
+            log.warn("DC {} arch {} circuit breaker: HALF_OPEN -> OPEN (probe failed, {} consecutive failures)",
+                    location, arch, consecutiveFailures);
             recordTransition(State.HALF_OPEN, State.OPEN);
         } else if (consecutiveFailures >= FAILURE_THRESHOLD) {
             state = State.OPEN;
             openedAt = System.currentTimeMillis();
-            log.warn("DC {} circuit breaker: CLOSED -> OPEN ({} consecutive failures)",
-                    location, consecutiveFailures);
+            log.warn("DC {} arch {} circuit breaker: CLOSED -> OPEN ({} consecutive failures)",
+                    location, arch, consecutiveFailures);
             recordTransition(State.CLOSED, State.OPEN);
         } else {
-            log.info("DC {} provisioning failed ({}/{} before circuit opens)",
-                    location, consecutiveFailures, FAILURE_THRESHOLD);
+            log.info("DC {} arch {} provisioning failed ({}/{} before circuit opens)",
+                    location, arch, consecutiveFailures, FAILURE_THRESHOLD);
         }
     }
 
@@ -125,7 +132,7 @@ class DcCircuitBreaker {
         // the state change.
         if (state == State.OPEN && System.currentTimeMillis() - openedAt >= RESET_TIMEOUT_MS) {
             state = State.HALF_OPEN;
-            HetznerMetricProvider.DC_BREAKER_STATE.labels(location).set(State.HALF_OPEN.ordinal());
+            HetznerMetricProvider.DC_BREAKER_STATE.labels(location, arch).set(State.HALF_OPEN.ordinal());
         }
         return state;
     }
@@ -148,21 +155,31 @@ class DcCircuitBreaker {
      * render the loaded state right after master boot) and applies the
      * stale-OPEN TTL so an old transient outage does not pin a DC out of
      * rotation after a long restart.
+     *
+     * <p>{@code fallbackArch} fills in this field for pre-v25 XML where
+     * the breaker map was keyed solely by location and the breaker itself
+     * had no arch coordinate. {@link DcHealthTracker#load()} synthesizes
+     * one breaker per arch from each legacy entry and feeds the chosen
+     * arch here.
      */
-    synchronized void afterLoad(String fallbackLocation, long now, long staleOpenTtlMs) {
+    synchronized void afterLoad(String fallbackLocation, String fallbackArch,
+                                long now, long staleOpenTtlMs) {
         if (location == null) {
             location = fallbackLocation;
         }
+        if (arch == null) {
+            arch = fallbackArch;
+        }
         if (state == State.OPEN && now - openedAt >= staleOpenTtlMs) {
-            log.info("DC {} circuit breaker: OPEN -> CLOSED on load (stale, last failure {}ms ago)",
-                    location, now - openedAt);
+            log.info("DC {} arch {} circuit breaker: OPEN -> CLOSED on load (stale, last failure {}ms ago)",
+                    location, arch, now - openedAt);
             state = State.CLOSED;
             consecutiveFailures = 0;
             openedAt = 0;
-            HetznerMetricProvider.DC_HEALTH_STALE_OPEN_RESETS.labels(location).inc();
+            HetznerMetricProvider.DC_HEALTH_STALE_OPEN_RESETS.labels(location, arch).inc();
         }
-        HetznerMetricProvider.DC_BREAKER_STATE.labels(location).set(state.ordinal());
-        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels(location).set(consecutiveFailures);
+        HetznerMetricProvider.DC_BREAKER_STATE.labels(location, arch).set(state.ordinal());
+        HetznerMetricProvider.DC_BREAKER_CONSECUTIVE_FAILURES.labels(location, arch).set(consecutiveFailures);
     }
 
     /** Visible for testing. */

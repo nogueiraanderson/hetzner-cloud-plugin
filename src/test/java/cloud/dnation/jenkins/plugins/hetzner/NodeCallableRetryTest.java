@@ -101,7 +101,7 @@ class NodeCallableRetryTest {
         assertThrows(HetznerProvisioningException.class, callable::call);
 
         // fsn1 should have a failure recorded
-        assertFalse(DcHealthTracker.isHealthy("fsn1") && DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures() == 0,
+        assertFalse(DcHealthTracker.isHealthy("fsn1", "amd64") && DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures() == 0,
                 "fsn1 should have at least one failure recorded");
     }
 
@@ -131,8 +131,8 @@ class NodeCallableRetryTest {
         HetznerProvisioningException ex = assertThrows(HetznerProvisioningException.class, callable::call);
         assertEquals(401, ex.getHttpStatus());
         // Auth error is not DC-attributable; neither breaker should move.
-        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
         // And no failover attempt should have been issued.
         verify(mgr, times(1)).createServer(any(), any());
     }
@@ -158,8 +158,8 @@ class NodeCallableRetryTest {
 
         NodeCallable callable = new NodeCallable(agent, cloud, List.of(t1, t2));
         assertThrows(HetznerProvisioningException.class, callable::call);
-        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
         verify(mgr, times(1)).createServer(any(), any());
     }
 
@@ -185,8 +185,8 @@ class NodeCallableRetryTest {
 
         NodeCallable callable = new NodeCallable(agent, cloud, List.of(t1, t2));
         assertThrows(HetznerProvisioningException.class, callable::call);
-        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
         verify(mgr, times(1)).createServer(any(), any());
     }
 
@@ -214,8 +214,8 @@ class NodeCallableRetryTest {
         // Last exception should be from nbg1
         assertEquals("nbg1", ex.getLocation());
         // Both should have failures
-        assertTrue(DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures() >= 1);
-        assertTrue(DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures() >= 1);
+        assertTrue(DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures() >= 1);
+        assertTrue(DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures() >= 1);
     }
 
     /**
@@ -273,7 +273,7 @@ class NodeCallableRetryTest {
         NodeCallable callable = new NodeCallable(agent, cloud, ranked);
 
         assertThrows(HetznerProvisioningException.class, callable::call);
-        assertEquals(1, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
+        assertEquals(1, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
     }
 
     @Test
@@ -298,8 +298,8 @@ class NodeCallableRetryTest {
         HetznerProvisioningException ex = assertThrows(HetznerProvisioningException.class, callable::call);
         assertTrue(ex.isRateLimited());
         // Rate limit throws BEFORE recordFailure, so neither DC should have failures
-        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
         // Verify only ONE provisioning attempt was made (no DC failover)
         verify(mgr, times(1)).createServer(any(), any());
     }
@@ -326,8 +326,8 @@ class NodeCallableRetryTest {
         HetznerProvisioningException ex = assertThrows(HetznerProvisioningException.class, callable::call);
         assertTrue(ex.isConfigError());
         // Config error throws BEFORE recordFailure, so neither DC should have failures
-        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
         // Verify only ONE provisioning attempt was made (no DC failover)
         verify(mgr, times(1)).createServer(any(), any());
     }
@@ -361,8 +361,8 @@ class NodeCallableRetryTest {
 
         assertThrows(HetznerProvisioningException.class, callable::call);
         // No DC failures recorded - cap is cloud-wide, not DC-scoped
-        assertEquals(0, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
         // No failover either
         verify(mgr, times(1)).createServer(any(), eq(t1));
         verify(mgr, times(0)).createServer(any(), eq(t2));
@@ -409,8 +409,8 @@ class NodeCallableRetryTest {
         verify(mgr, times(0)).createServer(any(), eq(t2));
         // fsn1 failure is still recorded (the API call failed before the
         // compatibility check refused failover).
-        assertEquals(1, DcHealthTracker.getBreaker("fsn1").getConsecutiveFailures());
-        assertEquals(0, DcHealthTracker.getBreaker("nbg1").getConsecutiveFailures());
+        assertEquals(1, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
+        assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
     }
 
     /**

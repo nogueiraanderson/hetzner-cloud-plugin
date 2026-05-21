@@ -269,24 +269,29 @@ public final class HetznerMetricProvider {
     // DC failover
     // =====================================================================
 
-    /** Breaker state encoded as ordinal: 0=CLOSED, 1=OPEN, 2=HALF_OPEN. */
+    /**
+     * Breaker state encoded as ordinal: 0=CLOSED, 1=OPEN, 2=HALF_OPEN.
+     * v25+: {@code arch} label keeps amd64/arm64 capacity issues from
+     * polluting each other's routing signal. Value is one of
+     * {amd64, arm64, unknown}; see {@link #archOf(String)}.
+     */
     public static final Gauge DC_BREAKER_STATE = Gauge.build()
             .name("hetzner_dc_circuit_breaker_state")
-            .help("DC breaker state ordinal: 0=CLOSED, 1=OPEN, 2=HALF_OPEN")
-            .labelNames("location")
+            .help("DC breaker state ordinal: 0=CLOSED, 1=OPEN, 2=HALF_OPEN (per location, arch)")
+            .labelNames("location", "arch")
             .register();
 
-    /** Current consecutive failure count for the DC breaker. */
+    /** Current consecutive failure count for the DC breaker (per location, arch). */
     public static final Gauge DC_BREAKER_CONSECUTIVE_FAILURES = Gauge.build()
             .name("hetzner_dc_circuit_breaker_consecutive_failures")
-            .help("Consecutive failures for the DC since last success")
-            .labelNames("location")
+            .help("Consecutive failures for the (location, arch) since last success")
+            .labelNames("location", "arch")
             .register();
 
     public static final Counter DC_BREAKER_TRANSITIONS = Counter.build()
             .name("hetzner_dc_circuit_breaker_transitions_total")
-            .help("DC circuit breaker state transitions")
-            .labelNames("location", "from", "to")
+            .help("DC circuit breaker state transitions (per location, arch)")
+            .labelNames("location", "arch", "from", "to")
             .register();
 
     public static final Counter DC_FAILOVER = Counter.build()
@@ -337,7 +342,19 @@ public final class HetznerMetricProvider {
     public static final Counter DC_HEALTH_STALE_OPEN_RESETS = Counter.build()
             .name("hetzner_dc_health_stale_open_resets_total")
             .help("DC breakers reset from OPEN to CLOSED on load due to stale-OPEN TTL")
-            .labelNames("location")
+            .labelNames("location", "arch")
+            .register();
+
+    /**
+     * Pre-v25 location-only breaker keys migrated into per-arch breakers
+     * on first v25 load. Increment fires once per (location, arch) clone
+     * inside {@code DcHealthTracker.load()}. Sum over all labels equals
+     * the number of legacy entries observed during the migration window.
+     */
+    public static final Counter DC_HEALTH_LEGACY_KEYS_MIGRATED = Counter.build()
+            .name("hetzner_dc_health_legacy_keys_migrated_total")
+            .help("Pre-v25 DC breaker keys split into per-(location, arch) breakers on load")
+            .labelNames("location", "arch")
             .register();
 
     // =====================================================================
@@ -854,6 +871,7 @@ public final class HetznerMetricProvider {
         DC_HEALTH_SAVES.clear();
         DC_HEALTH_SAVE_FAILURES.clear();
         DC_HEALTH_STALE_OPEN_RESETS.clear();
+        DC_HEALTH_LEGACY_KEYS_MIGRATED.clear();
         REHYDRATED_WORKERS.clear();
         REHYDRATE_ATTEMPTS.clear();
         REHYDRATE_SUCCESSES.clear();

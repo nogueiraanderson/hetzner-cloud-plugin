@@ -71,9 +71,14 @@ class NodeCallable implements Callable<Node> {
             for (int i = 0; i < rankedTemplates.size(); i++) {
                 HetznerServerTemplate template = rankedTemplates.get(i);
                 String location = template.getLocation();
+                // v25+: every DC health record is arch-scoped so an
+                // ARM-only capacity event does not poison the AMD64
+                // breaker for the same DC. archOf() returns the canonical
+                // "amd64" / "arm64" / "unknown" bucket.
+                String arch = HetznerMetricProvider.archOf(template.getServerType());
                 try {
                     Node result = doProvisionAndTime(template);
-                    DcHealthTracker.recordSuccess(location);
+                    DcHealthTracker.recordSuccess(location, arch);
                     TemplateErrorTracker.recordSuccess(template.getName());
                     HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
                             cloud.name, template.getName(),
@@ -152,7 +157,7 @@ class NodeCallable implements Callable<Node> {
                     // post-merge review H2: previously recordFailure(location)
                     // ran unconditionally before this gate.
                     if (e.isPlausiblyDcAttributable()) {
-                        DcHealthTracker.recordFailure(location);
+                        DcHealthTracker.recordFailure(location, arch);
                         final String dcOutcome = e.isResourceUnavailable()
                                 ? HetznerMetricProvider.OUTCOME_DC_UNAVAILABLE
                                 : HetznerMetricProvider.OUTCOME_DC_ATTRIBUTABLE;
@@ -218,7 +223,7 @@ class NodeCallable implements Callable<Node> {
                     // can trip the breaker over time, while a single slow boot
                     // doesn't (threshold is 2 consecutive).
                     lastException = ioe;
-                    DcHealthTracker.recordFailure(location);
+                    DcHealthTracker.recordFailure(location, arch);
                     HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
                             cloud.name, template.getName(),
                             HetznerMetricProvider.OUTCOME_BOOTSTRAP_IO).inc();

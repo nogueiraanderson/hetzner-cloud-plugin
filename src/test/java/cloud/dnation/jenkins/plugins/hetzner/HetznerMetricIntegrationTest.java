@@ -50,31 +50,37 @@ class HetznerMetricIntegrationTest {
 
     // ---- DcCircuitBreaker -> metrics ------------------------------------
 
+    // v25: every breaker is arch-scoped. Tests below use "amd64" as the
+    // canonical fixture arch (mirrors archOf("cpx32")).
+    private static final String AMD64 = "amd64";
+
     @Test
     void breakerOpenTransitionEmitsStateAndCounter() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("loc-1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("loc-1", AMD64);
         // ctor seeds gauge with CLOSED ordinal
-        assertEquals(0.0, sample1("hetzner_dc_circuit_breaker_state", "location", "loc-1"));
+        assertEquals(0.0, sample2("hetzner_dc_circuit_breaker_state",
+                "location", "loc-1", "arch", AMD64));
 
         cb.recordFailure();
         cb.recordFailure();   // threshold=2 -> CLOSED -> OPEN
 
         assertEquals((double) DcCircuitBreaker.State.OPEN.ordinal(),
-                sample1("hetzner_dc_circuit_breaker_state", "location", "loc-1"));
+                sample2("hetzner_dc_circuit_breaker_state",
+                        "location", "loc-1", "arch", AMD64));
         assertEquals(1.0, R.getSampleValue("hetzner_dc_circuit_breaker_transitions_total",
-                new String[]{"location", "from", "to"},
-                new String[]{"loc-1", "CLOSED", "OPEN"}));
-        assertEquals(2.0, sample1("hetzner_dc_circuit_breaker_consecutive_failures",
-                "location", "loc-1"));
+                new String[]{"location", "arch", "from", "to"},
+                new String[]{"loc-1", AMD64, "CLOSED", "OPEN"}));
+        assertEquals(2.0, sample2("hetzner_dc_circuit_breaker_consecutive_failures",
+                "location", "loc-1", "arch", AMD64));
     }
 
     @Test
     void breakerSuccessAfterFailureResetsConsecutiveFailures() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("loc-2");
+        DcCircuitBreaker cb = new DcCircuitBreaker("loc-2", AMD64);
         cb.recordFailure();
         cb.recordSuccess();
-        assertEquals(0.0, sample1("hetzner_dc_circuit_breaker_consecutive_failures",
-                "location", "loc-2"));
+        assertEquals(0.0, sample2("hetzner_dc_circuit_breaker_consecutive_failures",
+                "location", "loc-2", "arch", AMD64));
     }
 
     /**
@@ -83,7 +89,7 @@ class HetznerMetricIntegrationTest {
      */
     @Test
     void breakerHalfOpenProbeFailureRetripsToOpen() throws Exception {
-        DcCircuitBreaker cb = new DcCircuitBreaker("loc-3");
+        DcCircuitBreaker cb = new DcCircuitBreaker("loc-3", AMD64);
         cb.recordFailure();
         cb.recordFailure(); // CLOSED -> OPEN
         // Backdate openedAt so isHealthy() flips OPEN -> HALF_OPEN
@@ -97,17 +103,18 @@ class HetznerMetricIntegrationTest {
         // Transitions counter should record CLOSED->OPEN, OPEN->HALF_OPEN,
         // and HALF_OPEN->OPEN (3 distinct transition labels).
         assertEquals(1.0, R.getSampleValue("hetzner_dc_circuit_breaker_transitions_total",
-                new String[]{"location", "from", "to"},
-                new String[]{"loc-3", "CLOSED", "OPEN"}));
+                new String[]{"location", "arch", "from", "to"},
+                new String[]{"loc-3", AMD64, "CLOSED", "OPEN"}));
         assertEquals(1.0, R.getSampleValue("hetzner_dc_circuit_breaker_transitions_total",
-                new String[]{"location", "from", "to"},
-                new String[]{"loc-3", "OPEN", "HALF_OPEN"}));
+                new String[]{"location", "arch", "from", "to"},
+                new String[]{"loc-3", AMD64, "OPEN", "HALF_OPEN"}));
         assertEquals(1.0, R.getSampleValue("hetzner_dc_circuit_breaker_transitions_total",
-                new String[]{"location", "from", "to"},
-                new String[]{"loc-3", "HALF_OPEN", "OPEN"}));
+                new String[]{"location", "arch", "from", "to"},
+                new String[]{"loc-3", AMD64, "HALF_OPEN", "OPEN"}));
         // Final state gauge reflects OPEN
         assertEquals((double) DcCircuitBreaker.State.OPEN.ordinal(),
-                sample1("hetzner_dc_circuit_breaker_state", "location", "loc-3"));
+                sample2("hetzner_dc_circuit_breaker_state",
+                        "location", "loc-3", "arch", AMD64));
     }
 
     /**
@@ -117,7 +124,7 @@ class HetznerMetricIntegrationTest {
      */
     @Test
     void getStateLazyResetDoesNotEmitTransitionCounter() throws Exception {
-        DcCircuitBreaker cb = new DcCircuitBreaker("loc-4");
+        DcCircuitBreaker cb = new DcCircuitBreaker("loc-4", AMD64);
         cb.recordFailure();
         cb.recordFailure(); // CLOSED -> OPEN: transition_total{from=CLOSED,to=OPEN} = 1
         java.lang.reflect.Field f = DcCircuitBreaker.class.getDeclaredField("openedAt");
@@ -132,14 +139,15 @@ class HetznerMetricIntegrationTest {
         // Transitions counter for OPEN->HALF_OPEN must remain at 0 because
         // getState() does NOT emit the counter (only isHealthy() does).
         Double openToHalfOpen = R.getSampleValue("hetzner_dc_circuit_breaker_transitions_total",
-                new String[]{"location", "from", "to"},
-                new String[]{"loc-4", "OPEN", "HALF_OPEN"});
+                new String[]{"location", "arch", "from", "to"},
+                new String[]{"loc-4", AMD64, "OPEN", "HALF_OPEN"});
         assertTrue(openToHalfOpen == null || openToHalfOpen == 0.0,
                 "getState() must not emit OPEN->HALF_OPEN transitions; got " + openToHalfOpen);
 
         // But the state gauge IS updated, so dashboards stay consistent
         assertEquals((double) DcCircuitBreaker.State.HALF_OPEN.ordinal(),
-                sample1("hetzner_dc_circuit_breaker_state", "location", "loc-4"));
+                sample2("hetzner_dc_circuit_breaker_state",
+                        "location", "loc-4", "arch", AMD64));
     }
 
     // ---- TemplateErrorTracker -> metrics --------------------------------
@@ -205,5 +213,13 @@ class HetznerMetricIntegrationTest {
 
     private static Double sample1(String name, String labelName, String labelValue) {
         return R.getSampleValue(name, new String[]{labelName}, new String[]{labelValue});
+    }
+
+    private static Double sample2(String name,
+                                  String l1Name, String l1Value,
+                                  String l2Name, String l2Value) {
+        return R.getSampleValue(name,
+                new String[]{l1Name, l2Name},
+                new String[]{l1Value, l2Value});
     }
 }

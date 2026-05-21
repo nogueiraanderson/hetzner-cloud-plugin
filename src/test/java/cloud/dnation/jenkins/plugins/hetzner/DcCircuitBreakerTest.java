@@ -32,7 +32,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void newBreakerStartsClosed() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         assertEquals(DcCircuitBreaker.State.CLOSED, cb.getState());
         assertTrue(cb.isHealthy());
         assertEquals(0, cb.getConsecutiveFailures());
@@ -40,7 +40,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void singleFailureStaysClosed() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         assertEquals(DcCircuitBreaker.State.CLOSED, cb.getState());
         assertTrue(cb.isHealthy());
@@ -49,7 +49,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void twoConsecutiveFailuresOpensCircuit() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         cb.recordFailure();
         assertEquals(DcCircuitBreaker.State.OPEN, cb.getState());
@@ -59,7 +59,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void successResetsFailureCount() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         cb.recordSuccess();
         assertEquals(DcCircuitBreaker.State.CLOSED, cb.getState());
@@ -69,7 +69,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void successAfterOpenResetsToClosed() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         cb.recordFailure();
         assertEquals(DcCircuitBreaker.State.OPEN, cb.getState());
@@ -81,7 +81,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void openTransitionsToHalfOpenAfterTimeout() throws Exception {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         cb.recordFailure();
         assertEquals(DcCircuitBreaker.State.OPEN, cb.getState());
@@ -95,7 +95,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void halfOpenFailureReopensCircuit() throws Exception {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         cb.recordFailure();
 
@@ -110,7 +110,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void halfOpenSuccessCloses() throws Exception {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         cb.recordFailure();
         cb.recordFailure();
 
@@ -134,13 +134,13 @@ class DcCircuitBreakerTest {
 
     @Test
     void locationIsPreserved() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("nbg1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("nbg1", "amd64");
         assertEquals("nbg1", cb.getLocation());
     }
 
     @Test
     void concurrentFailuresAreThreadSafe() throws Exception {
-        DcCircuitBreaker cb = new DcCircuitBreaker("hel1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("hel1", "amd64");
         int threads = 10;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         CountDownLatch latch = new CountDownLatch(threads);
@@ -170,7 +170,7 @@ class DcCircuitBreakerTest {
 
     @Test
     void timestampsAreRecorded() {
-        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1");
+        DcCircuitBreaker cb = new DcCircuitBreaker("fsn1", "amd64");
         long before = System.currentTimeMillis();
         cb.recordSuccess();
         assertTrue(cb.getLastSuccessAt() >= before);

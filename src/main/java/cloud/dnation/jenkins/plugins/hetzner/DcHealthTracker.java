@@ -25,6 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,9 +35,39 @@ import java.util.stream.Collectors;
 @Slf4j
 public class DcHealthTracker {
 
+    // v103.percona.25: map keys are "<location>:<arch>" composite strings.
+    // String keys (vs a record type) keep XStream serialization simple and
+    // backward-compatible with the pre-v25 single-location format; legacy
+    // entries are migrated in load() by cloning each into two arch-keyed
+    // breakers. The breaker object itself carries (location, arch) so
+    // iteration over BREAKERS does not need to parse the key.
     private static final ConcurrentHashMap<String, DcCircuitBreaker> BREAKERS = new ConcurrentHashMap<>();
     private static final long STALE_OPEN_TTL_MS = 30 * 60 * 1000L;
     private static final AtomicBoolean SAVE_SCHEDULED = new AtomicBoolean(false);
+
+    // Composite key delimiter for "<location>:<arch>". Hetzner location
+    // codes (fsn1/hel1/nbg1/ash/...) never contain ':', so this is safe.
+    private static final String KEY_DELIM = ":";
+
+    /** Build the composite map key for a (location, arch) pair. */
+    static String encodeKey(String location, String arch) {
+        return location + KEY_DELIM + arch;
+    }
+
+    /**
+     * Split a composite key into {location, arch}. Returns null on a legacy
+     * single-segment key so the caller can drive the migration path.
+     */
+    static String[] decodeKey(String key) {
+        if (key == null) {
+            return null;
+        }
+        int idx = key.indexOf(KEY_DELIM);
+        if (idx < 0) {
+            return null;
+        }
+        return new String[] { key.substring(0, idx), key.substring(idx + 1) };
+    }
 
     private DcHealthTracker() {
     }
@@ -57,11 +88,34 @@ public class DcHealthTracker {
             Store store = (Store) xml.read();
             if (store != null && store.breakers != null) {
                 long now = System.currentTimeMillis();
-                store.breakers.forEach((location, breaker) -> {
-                    if (location != null && breaker != null) {
-                        breaker.afterLoad(location, now, STALE_OPEN_TTL_MS);
-                        BREAKERS.put(location, breaker);
+                store.breakers.forEach((rawKey, breaker) -> {
+                    if (rawKey == null || breaker == null) {
+                        return;
                     }
+                    String[] decoded = decodeKey(rawKey);
+                    if (decoded != null) {
+                        // v25+ composite key: load as-is.
+                        String location = decoded[0];
+                        String arch = decoded[1];
+                        breaker.afterLoad(location, arch, now, STALE_OPEN_TTL_MS);
+                        BREAKERS.put(rawKey, breaker);
+                        return;
+                    }
+                    // Legacy pre-v25 key: the persisted breaker has no arch
+                    // and no way to know which arch tripped it. Clone state
+                    // into a breaker for each canonical arch so the loaded
+                    // state still gates BOTH arches' templates until normal
+                    // operation (or the stale-OPEN TTL) resolves them.
+                    String legacyLocation = rawKey;
+                    for (String arch : HetznerMetricProvider.ALWAYS_EMIT_ARCHS) {
+                        DcCircuitBreaker clone = clonePreV25Breaker(breaker, legacyLocation, arch);
+                        clone.afterLoad(legacyLocation, arch, now, STALE_OPEN_TTL_MS);
+                        BREAKERS.put(encodeKey(legacyLocation, arch), clone);
+                        HetznerMetricProvider.DC_HEALTH_LEGACY_KEYS_MIGRATED
+                                .labels(legacyLocation, arch).inc();
+                    }
+                    log.info("Hetzner DC health: migrated pre-v25 legacy key '{}' into per-arch breakers {}",
+                            legacyLocation, Arrays.toString(HetznerMetricProvider.ALWAYS_EMIT_ARCHS.toArray()));
                 });
                 HetznerMetricProvider.DC_HEALTH_LOADED_BREAKERS.set(BREAKERS.size());
                 log.info("Hetzner DC health state loaded from {}: {} breakers",
@@ -73,33 +127,63 @@ public class DcHealthTracker {
     }
 
     /**
-     * Get or create the circuit breaker for a given DC location.
+     * Build a v25+ breaker carrying the in-memory state of a pre-v25 legacy
+     * entry. Used by {@link #load()} during the one-time migration window.
+     * Reflective field copy keeps the migration path local to this class
+     * without exposing breaker internals.
      */
-    static DcCircuitBreaker getBreaker(String location) {
-        return BREAKERS.computeIfAbsent(location, DcCircuitBreaker::new);
+    private static DcCircuitBreaker clonePreV25Breaker(DcCircuitBreaker source,
+                                                       String location, String arch) {
+        DcCircuitBreaker clone = new DcCircuitBreaker(location, arch);
+        try {
+            java.lang.reflect.Field stateField = DcCircuitBreaker.class.getDeclaredField("state");
+            stateField.setAccessible(true);
+            stateField.set(clone, stateField.get(source));
+            java.lang.reflect.Field cfField = DcCircuitBreaker.class.getDeclaredField("consecutiveFailures");
+            cfField.setAccessible(true);
+            cfField.setInt(clone, cfField.getInt(source));
+            java.lang.reflect.Field openedAtField = DcCircuitBreaker.class.getDeclaredField("openedAt");
+            openedAtField.setAccessible(true);
+            openedAtField.setLong(clone, openedAtField.getLong(source));
+            java.lang.reflect.Field lastSuccessField = DcCircuitBreaker.class.getDeclaredField("lastSuccessAt");
+            lastSuccessField.setAccessible(true);
+            lastSuccessField.setLong(clone, lastSuccessField.getLong(source));
+            java.lang.reflect.Field lastFailureField = DcCircuitBreaker.class.getDeclaredField("lastFailureAt");
+            lastFailureField.setAccessible(true);
+            lastFailureField.setLong(clone, lastFailureField.getLong(source));
+        } catch (ReflectiveOperationException e) {
+            log.warn("Failed to copy pre-v25 breaker state for {}:{}, starting clone CLOSED",
+                    location, arch, e);
+        }
+        return clone;
     }
 
     /**
-     * Record a provisioning failure for the given DC.
+     * Get or create the circuit breaker for a given (DC location, arch)
+     * pair. v25+: every breaker is arch-scoped. Pass
+     * {@link HetznerMetricProvider#archOf(String)} of the template's
+     * server type to derive {@code arch}.
      */
-    static void recordFailure(String location) {
-        getBreaker(location).recordFailure();
+    static DcCircuitBreaker getBreaker(String location, String arch) {
+        return BREAKERS.computeIfAbsent(encodeKey(location, arch),
+                k -> new DcCircuitBreaker(location, arch));
+    }
+
+    /** Record a provisioning failure for the (location, arch). */
+    static void recordFailure(String location, String arch) {
+        getBreaker(location, arch).recordFailure();
         save();
     }
 
-    /**
-     * Record a provisioning success for the given DC.
-     */
-    static void recordSuccess(String location) {
-        getBreaker(location).recordSuccess();
+    /** Record a provisioning success for the (location, arch). */
+    static void recordSuccess(String location, String arch) {
+        getBreaker(location, arch).recordSuccess();
         save();
     }
 
-    /**
-     * Check if a DC is currently considered healthy.
-     */
-    static boolean isHealthy(String location) {
-        return getBreaker(location).isHealthy();
+    /** Check if (location, arch) is currently considered healthy. */
+    static boolean isHealthy(String location, String arch) {
+        return getBreaker(location, arch).isHealthy();
     }
 
     /**
@@ -115,12 +199,19 @@ public class DcHealthTracker {
             return templates == null ? Collections.emptyList() : new ArrayList<>(templates);
         }
 
+        // v25+: each template's health gate is per (location, arch). Note:
+        // HetznerServerTemplate.getServerType() returns a String (the SKU
+        // name, e.g. "cpx32" / "cax21"); do NOT chain .getName() on it.
+        java.util.function.Predicate<HetznerServerTemplate> healthFor = t -> isHealthy(
+                t.getLocation(),
+                HetznerMetricProvider.archOf(t.getServerType()));
+
         List<HetznerServerTemplate> healthy = templates.stream()
-                .filter(t -> isHealthy(t.getLocation()))
+                .filter(healthFor)
                 .collect(Collectors.toCollection(ArrayList::new));
 
         List<HetznerServerTemplate> unhealthy = templates.stream()
-                .filter(t -> !isHealthy(t.getLocation()))
+                .filter(healthFor.negate())
                 .collect(Collectors.toCollection(ArrayList::new));
 
         Collections.shuffle(healthy);

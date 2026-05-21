@@ -77,7 +77,13 @@ public class HetznerCloud extends AbstractCloudImpl {
      * Incremented before submitting NodeCallable, decremented in its finally
      * block (success or failure). Included in the effective cap calculation.
      */
-    private final transient AtomicInteger pendingProvisions = new AtomicInteger(0);
+    // Non-final + lazy ensureXxx() guard at access sites: XStream's
+    // Unsafe.allocateInstance bypasses the field initializer, so a freshly
+    // deserialized HetznerCloud (e.g. after a plugin dynamic reload) can
+    // briefly see this field as null before readResolve() runs. Belt-and-
+    // suspenders: readResolve() also null-inits both transient fields.
+    // See ensurePendingProvisions() and ensureSeenArchExtras().
+    private transient AtomicInteger pendingProvisions = new AtomicInteger(0);
 
     @DataBoundConstructor
     public HetznerCloud(String name, String credentialsId, String instanceCapStr,
@@ -107,6 +113,13 @@ public class HetznerCloud extends AbstractCloudImpl {
     }
 
     protected Object readResolve() {
+        // Transient fields are not part of the persisted XML; XStream's
+        // Unsafe.allocateInstance bypasses field initializers, so we
+        // rehydrate them explicitly here. Access sites also lazy-guard via
+        // ensureXxx() so any future path that bypasses readResolve() stays
+        // safe.
+        ensurePendingProvisions();
+        ensureSeenArchExtras();
         resourceManager = HetznerCloudResourceManager.create(credentialsId);
         if (serverTemplates == null) {
             setServerTemplates(Collections.emptyList());
@@ -161,8 +174,32 @@ public class HetznerCloud extends AbstractCloudImpl {
      * (a strange-SKU incident two weeks ago is no longer relevant if the
      * fleet has been clean ever since).
      */
-    private final transient java.util.Set<String> seenArchExtras =
+    private transient java.util.Set<String> seenArchExtras =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Lazy-init guard for {@link #pendingProvisions}. XStream's
+     * Unsafe.allocateInstance bypasses the field initializer; readResolve()
+     * also calls this so deserialized instances are safe by the time the
+     * first provisioning / refresh tick runs. Idempotent.
+     */
+    private synchronized AtomicInteger ensurePendingProvisions() {
+        if (pendingProvisions == null) {
+            pendingProvisions = new AtomicInteger(0);
+        }
+        return pendingProvisions;
+    }
+
+    /**
+     * Lazy-init guard for {@link #seenArchExtras}. Same Unsafe-bypass
+     * rationale as {@link #ensurePendingProvisions()}. Idempotent.
+     */
+    private synchronized java.util.Set<String> ensureSeenArchExtras() {
+        if (seenArchExtras == null) {
+            seenArchExtras = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        }
+        return seenArchExtras;
+    }
 
     @SneakyThrows
     private int runningNodeCount() {
@@ -191,9 +228,10 @@ public class HetznerCloud extends AbstractCloudImpl {
         // or otherwise). Only non-zero observations matter; a strict zero
         // for an arch we've never seen would create the very noise we are
         // trying to avoid.
+        java.util.Set<String> extras = ensureSeenArchExtras();
         byArch.forEach((arch, count) -> {
             if (count > 0 && !HetznerMetricProvider.ALWAYS_EMIT_ARCHS.contains(arch)) {
-                seenArchExtras.add(arch);
+                extras.add(arch);
             }
         });
         int total = 0;
@@ -202,7 +240,7 @@ public class HetznerCloud extends AbstractCloudImpl {
             HetznerMetricProvider.RUNNING_SERVERS.labels(name, arch).set(c);
             total += Ints.checkedCast(c);
         }
-        for (String arch : seenArchExtras) {
+        for (String arch : extras) {
             long c = byArch.getOrDefault(arch, 0L);
             HetznerMetricProvider.RUNNING_SERVERS.labels(name, arch).set(c);
             total += Ints.checkedCast(c);
@@ -215,7 +253,7 @@ public class HetznerCloud extends AbstractCloudImpl {
      * in the Hetzner API. Prevents over-provisioning during burst demand.
      */
     private int effectiveNodeCount() {
-        return runningNodeCount() + pendingProvisions.get();
+        return runningNodeCount() + ensurePendingProvisions().get();
     }
 
     /**
@@ -243,7 +281,7 @@ public class HetznerCloud extends AbstractCloudImpl {
         // does not drift from the network; re-emit defensively in case a
         // provisioning code path forgot to update the gauge after mutating
         // the counter.
-        HetznerMetricProvider.PROVISIONING_PENDING.labels(name).set(pendingProvisions.get());
+        HetznerMetricProvider.PROVISIONING_PENDING.labels(name).set(ensurePendingProvisions().get());
     }
 
     /**
@@ -251,13 +289,13 @@ public class HetznerCloud extends AbstractCloudImpl {
      * provisioning completes (success or failure).
      */
     void provisionCompleted() {
-        int prev = pendingProvisions.getAndDecrement();
+        int prev = ensurePendingProvisions().getAndDecrement();
         if (prev <= 0) {
-            pendingProvisions.set(0);
+            ensurePendingProvisions().set(0);
             log.warn("pendingProvisions underflow corrected (was {})", prev);
             HetznerMetricProvider.PROVISION_UNDERFLOW.labels(name).inc();
         }
-        HetznerMetricProvider.PROVISIONING_PENDING.labels(name).set(pendingProvisions.get());
+        HetznerMetricProvider.PROVISIONING_PENDING.labels(name).set(ensurePendingProvisions().get());
     }
 
     @Override
@@ -301,7 +339,7 @@ public class HetznerCloud extends AbstractCloudImpl {
                 }
                 log.info("Creating new agent with {} executors, have {} running VMs "
                         + "(pending={})", template.getNumExecutors(), running,
-                        pendingProvisions.get());
+                        ensurePendingProvisions().get());
                 if (available <= 0) {
                     log.warn("Cloud capacity reached ({}). Has {} VMs running+pending, "
                             + "but want {} more executors",
@@ -309,8 +347,8 @@ public class HetznerCloud extends AbstractCloudImpl {
                     HetznerMetricProvider.PROVISION_SKIPPED.labels(name, "cap_reached").inc();
                     break;
                 } else {
-                    pendingProvisions.incrementAndGet();
-                    HetznerMetricProvider.PROVISIONING_PENDING.labels(name).set(pendingProvisions.get());
+                    ensurePendingProvisions().incrementAndGet();
+                    HetznerMetricProvider.PROVISIONING_PENDING.labels(name).set(ensurePendingProvisions().get());
                     // Anything between incrementAndGet() and a successful submit can
                     // leak the increment (template.createAgent throws, the executor
                     // rejects with RejectedExecutionException at shutdown, etc.).
@@ -335,7 +373,7 @@ public class HetznerCloud extends AbstractCloudImpl {
                     } finally {
                         if (!submitted) {
                             // NodeCallable.call() will never run, so its finally
-                            // block can't restore pendingProvisions. Do it here.
+                            // block can't restore ensurePendingProvisions(). Do it here.
                             provisionCompleted();
                         }
                     }
