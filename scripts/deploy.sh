@@ -48,7 +48,11 @@ echo "  $result"
 # Smart restart. Quiet-down is banned (blocks new builds + queues a
 # surprise restart that lands mid-shift). For busy masters we leave the
 # .jpi.pinned in place and wait for the next natural JVM restart.
-busy=$(jenkins admin -i "$inst" executors -r 2>&1 | tail -n +2 | wc -l)
+# Use --real so zombie executors (REST `currentExecutable` set but
+# `Run.isBuilding()=false`) don't pin idle masters as busy forever.
+busy=$(jenkins admin -i "$inst" executors -r --real --llm 2>/dev/null \
+    | awk -F'|' '/^real\|/ {print $2; exit}')
+busy=${busy:-0}
 if [[ "$busy" -eq 0 ]]; then
     echo "  Idle. Force restarting..."
     jenkins admin -i "$inst" restart --force 2>/dev/null || true
