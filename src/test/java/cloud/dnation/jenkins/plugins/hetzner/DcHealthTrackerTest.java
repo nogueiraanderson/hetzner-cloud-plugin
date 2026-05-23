@@ -247,6 +247,120 @@ class DcHealthTrackerTest {
         assertEquals("arm-fsn", ranked.get(1).getName());
     }
 
+    /**
+     * v103.percona.26: filterHealthy drops templates whose (location, arch)
+     * breaker is OPEN. This is the entry-point storm gate used by
+     * HetznerCloud.provision() to short-circuit the API hammering observed
+     * during the 2026-05-22 cax arm64 shortage incident.
+     */
+    @Test
+    void filterHealthyDropsOpenBreakers() {
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1");  // amd64
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1");  // amd64
+        HetznerServerTemplate t3 = makeTemplate("t3", "hel1");  // amd64
+
+        // Open fsn1+amd64 only; nbg1 and hel1 stay healthy
+        DcHealthTracker.recordFailure("fsn1", AMD64);
+        DcHealthTracker.recordFailure("fsn1", AMD64);
+
+        List<HetznerServerTemplate> healthy = DcHealthTracker.filterHealthy(
+                Lists.newArrayList(t1, t2, t3));
+        assertEquals(2, healthy.size());
+        // t1 (fsn1, OPEN) is filtered out; t2 and t3 remain
+        Set<String> names = new HashSet<>();
+        names.add(healthy.get(0).getName());
+        names.add(healthy.get(1).getName());
+        assertTrue(names.contains("t2"));
+        assertTrue(names.contains("t3"));
+        assertFalse(names.contains("t1"), "unhealthy template must be filtered out");
+    }
+
+    /**
+     * v103.percona.26: when every matching DC is OPEN, filterHealthy
+     * returns an empty list. HetznerCloud.provision() uses this to gate
+     * the API call entirely.
+     */
+    @Test
+    void filterHealthyAllUnhealthyReturnsEmpty() {
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1");
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1");
+        HetznerServerTemplate t3 = makeTemplate("t3", "hel1");
+
+        // All three amd64 DCs open
+        for (String dc : new String[]{"fsn1", "nbg1", "hel1"}) {
+            DcHealthTracker.recordFailure(dc, AMD64);
+            DcHealthTracker.recordFailure(dc, AMD64);
+        }
+
+        List<HetznerServerTemplate> healthy = DcHealthTracker.filterHealthy(
+                Lists.newArrayList(t1, t2, t3));
+        assertTrue(healthy.isEmpty(),
+                "all DCs OPEN must return empty list (storm-gate invariant)");
+    }
+
+    /**
+     * v103.percona.26: filterHealthy is arch-scoped, so an ARM-only outage
+     * in a DC does not affect AMD64 templates in the same DC. Mirrors the
+     * v25 archIndependenceWithinSameDc invariant.
+     */
+    @Test
+    void filterHealthyIsArchScoped() {
+        HetznerServerTemplate arm = new HetznerServerTemplate("arm-fsn", "armLbl",
+                "img1", "fsn1", "cax21");
+        HetznerServerTemplate amd = new HetznerServerTemplate("amd-fsn", "amdLbl",
+                "img1", "fsn1", "cpx32");
+
+        // Trip ARM in fsn1 only
+        DcHealthTracker.recordFailure("fsn1", ARM64);
+        DcHealthTracker.recordFailure("fsn1", ARM64);
+
+        List<HetznerServerTemplate> healthy = DcHealthTracker.filterHealthy(
+                Lists.newArrayList(arm, amd));
+        assertEquals(1, healthy.size());
+        assertEquals("amd-fsn", healthy.get(0).getName(),
+                "AMD64 template must remain when only ARM in same DC is OPEN");
+    }
+
+    /**
+     * v103.percona.26: templates whose serverType maps to arch="unknown"
+     * (non-canonical Hetzner SKU prefix) get a distinct breaker
+     * (location, "unknown"). If that breaker is OPEN, filterHealthy must
+     * drop the template. Pins the v23/v24 lazy-emit arch path.
+     */
+    @Test
+    void filterHealthyHandlesUnknownArch() {
+        HetznerServerTemplate unknown = new HetznerServerTemplate("unk-fsn", "lbl",
+                "img1", "fsn1", "zzz99");  // SKU prefix that archOf() maps to "unknown"
+        HetznerServerTemplate amd = makeTemplate("amd-fsn", "fsn1");
+
+        // Open the (fsn1, unknown) breaker explicitly
+        DcHealthTracker.recordFailure("fsn1", "unknown");
+        DcHealthTracker.recordFailure("fsn1", "unknown");
+
+        List<HetznerServerTemplate> healthy = DcHealthTracker.filterHealthy(
+                Lists.newArrayList(unknown, amd));
+        assertEquals(1, healthy.size());
+        assertEquals("amd-fsn", healthy.get(0).getName(),
+                "unknown-arch template must be filtered when its (loc, unknown) breaker is OPEN");
+    }
+
+    /**
+     * v103.percona.26: filterHealthy handles null and empty input
+     * gracefully (returns empty list, never throws).
+     */
+    @Test
+    void filterHealthyHandlesEdgeCases() {
+        assertTrue(DcHealthTracker.filterHealthy(null).isEmpty(),
+                "null input -> empty list");
+        assertTrue(DcHealthTracker.filterHealthy(Collections.emptyList()).isEmpty(),
+                "empty input -> empty list");
+
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1");
+        List<HetznerServerTemplate> single = DcHealthTracker.filterHealthy(
+                Collections.singletonList(t1));
+        assertEquals(1, single.size(), "single healthy template -> single-element list");
+    }
+
     private HetznerServerTemplate makeTemplate(String name, String location) {
         return new HetznerServerTemplate(name, "label1", "img1", location, "cpx32");
     }

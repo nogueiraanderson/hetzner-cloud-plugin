@@ -2,6 +2,192 @@
 
 All notable Percona patches to [hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) are documented here.
 
+## v103.percona.26 (2026-05-23)
+
+Closes the OPEN-breaker API storm path uncovered by the 2026-05-22 cax arm64
+shortage incident. With all three Hetzner arm64 DCs OPEN on `ps80.cd` (cax
+capacity event, same pattern as PS-11149), the plugin sustained ~35 API
+requests/minute trying to provision against unhealthy DCs. That single
+master alone drained the Hetzner project-level API budget shared across the
+whole fleet, dropping `hetzner_api_rate_limit_remaining` from ~3599 to
+single-digit headroom on all 10 masters in ~30 minutes (cross-master Pearson
+r = +0.96 over the 21:00-22:30 UTC window).
+
+Root cause: `DcHealthTracker.sortByHealth` *sorts* matching templates by
+breaker health but does NOT *filter* unhealthy ones, so
+`HetznerCloud.provision()` picked `rankedTemplates.get(0)` even when all
+were OPEN; `NodeCallable.call()` then iterated the full list calling
+`createServer()` per template with no per-template `isHealthy()` gate; and
+the HALF_OPEN probe was not single-use, so concurrent provision() calls
+stampeded the API on every reset window.
+
+### Added
+
+- `DcHealthTracker.filterHealthy(List<HetznerServerTemplate>)` and
+  `DcHealthTracker.isHealthy(HetznerServerTemplate)` helpers. Used by
+  `HetznerCloud.provision()` to short-circuit before `effectiveNodeCount()`
+  (the `fetchAllServers` API call) when all matching templates' breakers
+  are OPEN. `sortByHealth` is preserved as-is for diagnostic visibility.
+- `DcCircuitBreaker.isProbeable()` (non-consuming peek) and
+  `DcCircuitBreaker.tryAcquireProbe()` (consuming lease acquisition).
+  Replaces the previous single `isHealthy()` method. `isProbeable()` is
+  used by `filterHealthy` and `sortByHealth` so a filter pass cannot
+  steal the HALF_OPEN probe lease from the actual provisioner.
+  `tryAcquireProbe()` is called inside `NodeCallable.call()` at the
+  per-template gate (the actual createServer attempt site); it consumes
+  the lease so exactly one concurrent caller per HALF_OPEN window
+  reaches the Hetzner API. Bounds the per-reset-window API spend on a
+  still-broken DC.
+- `DcCircuitBreaker.HALF_OPEN_STALE_TTL_MS` (2 * RESET_TIMEOUT_MS = 10
+  minutes). If a probe-holder consumes the lease and then dies (thread
+  crash, non-DC-attributable exit path that does not call recordSuccess
+  / recordFailure), the lease is re-armed on the next probe call after
+  the TTL elapses. Prevents the breaker from being pinned in HALF_OPEN
+  forever. New counter
+  `hetzner_dc_health_stale_half_open_resets_total{location, arch}`
+  observes how often this fires.
+- `HetznerMetricProvider.REASON_*` constant family for `PROVISION_SKIPPED`
+  reasons (`jenkins_quieting`, `rate_limited`, `template_suppressed`,
+  `cap_reached`, and new `no_healthy_dc`), plus `ALL_PROVISION_SKIPPED_REASONS`
+  enumeration mirroring the existing outcome convention.
+- `HetznerMetricProvider.OUTCOME_DC_BREAKER_OPEN = "dc_breaker_open"` on
+  `PROVISION_ATTEMPTS`. Emitted by NodeCallable's per-template gate when a
+  template's breaker is OPEN at iteration time. Added to both
+  `ALL_PROVISION_OUTCOMES` and `PRECHECK_OUTCOMES` (no boot work
+  performed) so dashboards do not pollute boot-duration percentiles.
+
+### Changed
+
+- `HetznerCloud.provision()` now filters `matchingTemplates` to healthy
+  templates via `DcHealthTracker.filterHealthy` before calling
+  `effectiveNodeCount()`. If empty, increments
+  `PROVISION_SKIPPED{reason="no_healthy_dc"}` and breaks the
+  excessWorkload loop. Filtering is per-loop-iteration so a breaker that
+  trips during this provision() call short-circuits the next iteration.
+  The filtered (healthy) list is passed into `rankTemplatesByHealth` and
+  then into `NodeCallable`, so the inner failover loop only ever iterates
+  healthy DCs.
+- `HetznerCloud.provision()` 4 existing `PROVISION_SKIPPED.labels(name,
+  "<inline-literal>")` call sites refactored to use the new `REASON_*`
+  constants. Wire-format identical (same string values).
+- `NodeCallable.call()` per-template breaker gate: at iteration head,
+  before any `createServer` call, call
+  `DcHealthTracker.tryAcquireProbe(template)` (the consuming variant
+  that takes the HALF_OPEN probe lease at the actual API attempt site).
+  If false (CLOSED is always true; OPEN or HALF_OPEN-lease-taken
+  returns false), emit `PROVISION_ATTEMPTS{outcome="dc_breaker_open"}`,
+  respect the existing `isFailoverCompatibleWith` invariant before
+  advancing to the next ranked template (same gate as the
+  DC-attributable failure branch), and `continue` if compatible.
+  Belt-and-suspenders for breakers that open between provision()'s
+  filter and the per-template iteration.
+- `DcCircuitBreaker.isHealthy()` removed in favour of the
+  non-consuming / consuming split (see Added). Callers in
+  `DcHealthTracker` and tests updated. Behaviour preserved for the
+  consuming callers (`tryAcquireProbe()` is exactly the old
+  `isHealthy()` semantics); filterHealthy / sortByHealth now use the
+  non-consuming `isProbeable()` so a filter pass cannot steal the
+  HALF_OPEN probe.
+- `DcCircuitBreaker.getState()` lazy-reset path also arms the probe
+  lease, so a script-console getter call followed by a
+  tryAcquireProbe() in the same HALF_OPEN window correctly gives the
+  probe to the provisioner.
+
+### Explicitly not changed
+
+- `OrphanedNodesCleaner.cleanCloud()`: hourly `fetchAllServers` must run
+  during a DC outage to reap orphan VMs and remove ghost Jenkins nodes.
+  Keep the token-level `isRateLimited()` gate. 10 calls/hour fleet-wide,
+  not a storm contributor.
+- `HetznerMetricsRefresher.refreshCloud()`: 60 calls/hour per cloud is
+  load-bearing for the dashboard freshness contract; gating on breakers
+  would mask real outages with stale gauges.
+- `HungBuildDetector`: does not call the Hetzner API.
+- `DcHealthTracker.sortByHealth`: unchanged contract (sort, do not
+  filter); useful for diagnostic visibility and pinned by existing tests.
+
+### Tests
+
+- New `DcCircuitBreakerTest.halfOpenIsSingleProbe`,
+  `halfOpenLeaseRearmsAfterReopening`, `getStateLazyResetArmsProbeLease`
+  for the HALF_OPEN probe-lease invariants.
+- New `DcHealthTrackerTest.filterHealthy{DropsOpenBreakers,AllUnhealthyReturnsEmpty,IsArchScoped,HandlesUnknownArch,HandlesEdgeCases}`.
+- New `HetznerCloudSimpleTest.provisionSkipsWhenAllMatchingDcsUnhealthy`
+  (storm-gate regression: asserts ZERO `fetchAllServers` / `createServer`
+  calls when all matching breakers are OPEN, plus
+  `PROVISION_SKIPPED{reason="no_healthy_dc"}` == 1, plus
+  `PROVISIONING_PENDING` stays at 0).
+- New `HetznerCloudSimpleTest.provisionProceedsWhenOneHealthyDcExists`
+  (gate is not over-zealous: one healthy DC keeps provisioning live).
+- New `NodeCallableRetryTest.breakerOpenSkipsTemplate`,
+  `breakerOpenAllSkippedThrowsIllegalState`,
+  `breakerOpenSkipRespectsFailoverCompat`.
+- Updated `HetznerMetricProviderTest.provisionOutcomesEnumerationIsExhaustive`
+  to include `dc_breaker_open` (size 11 -> 12).
+- New `HetznerMetricProviderTest.provisionSkippedReasonsEnumerationIsExhaustive`
+  pinning the 5 REASON_* constants.
+- `HetznerCloudSimpleTest` + `NodeCallableRetryTest` now reset
+  `HetznerMetricProvider` in `@BeforeEach`/`@AfterEach` so the new
+  counter assertions cannot flake.
+
+### Compatibility
+
+- No persistence-schema changes (`$JENKINS_HOME/hetzner-dc-health.xml`
+  format unchanged). Rolling back to v25 is mechanically clean; Mimir
+  may retain v26 label series briefly (`no_healthy_dc`,
+  `dc_breaker_open`) but no series is removed.
+- Wire-format `PROVISION_SKIPPED` reason strings are unchanged
+  (`cap_reached`, `rate_limited`, etc.); only the call-site spelling
+  swapped from inline literals to constants.
+- Backward compatible with v25 dashboards. Adds two new label values
+  that will appear naturally during the next forced-open canary test
+  on ps3.
+
+## v103.percona.25 (2026-05-21)
+
+Two related fixes that ship together so v25 is the canonical post-incident
+plugin across the fleet.
+
+### Part A: Transient field rehydration in `HetznerCloud`
+
+XStream's `Unsafe.allocateInstance` bypasses field initializers on
+deserialized clouds (plugin dynamic reload, fresh-EBS rebuild). The
+`pendingProvisions AtomicInteger` and `seenArchExtras` set could be `null`
+on the first provisioning / refresh tick, NPE'ing the cap accounting and
+the lazy-arch path. v25 adds `ensurePendingProvisions()` /
+`ensureSeenArchExtras()` lazy guards plus a `readResolve()` re-init pass
+(belt-and-suspenders).
+
+### Part B: Per-arch DC circuit breakers
+
+`DcCircuitBreaker` and `DcHealthTracker` keys widened from a single
+`location` string to a composite `<location>:<arch>` so an ARM-only
+capacity event does not poison the AMD64 breaker for the same DC. Legacy
+XML (pre-v25 single-location format) is migrated on first load: each
+legacy entry is cloned into one breaker per arch in
+`ALWAYS_EMIT_ARCHS`. New counter
+`hetzner_dc_health_legacy_keys_migrated_total{location, arch}` makes the
+migration auditable.
+
+### Tests
+
+- New `DcHealthPersistenceTest` covers the legacy-key migration path
+  end-to-end.
+- `DcHealthTrackerTest.archIndependenceWithinSameDc` pins the invariant
+  that ARM failures in fsn1 do not trip the AMD64 breaker for fsn1.
+- `HetznerCloudRehydrateTest.{readResolveRehydratesBothTransientFields,
+  readResolveIsIdempotent, ensurePendingProvisionsLazyInitialisesOnAccess}`
+  cover the Part A guards.
+
+### Compatibility
+
+- One-shot migration on first load: each legacy breaker entry produces
+  N new entries (one per arch in `ALWAYS_EMIT_ARCHS`). Subsequent loads
+  no-op.
+- Backward compatible with v23/v24 dashboards. Series with `arch=arm64`
+  (or `arm64` + `unknown` after v24) are now distinct from the AMD64
+  versions; aggregations via `sum by(...)` are unchanged.
+
 ## v103.percona.24 (2026-05-20)
 
 Trims the `arch="unknown"` series so it only appears when a non-canonical Hetzner SKU is actually observed, rather than being emitted as a constant `0` on every refresh. v23 deployed to ps3 showed `hetzner_running_servers{arch="unknown"} 0` permanently, which is background noise and a false signal for any alert that watches `unknown > 0`.

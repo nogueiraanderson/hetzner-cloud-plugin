@@ -96,7 +96,7 @@ class HetznerMetricIntegrationTest {
         java.lang.reflect.Field f = DcCircuitBreaker.class.getDeclaredField("openedAt");
         f.setAccessible(true);
         f.setLong(cb, System.currentTimeMillis() - DcCircuitBreaker.resetTimeoutMs() - 1);
-        assertTrue(cb.isHealthy(), "breaker should transition to HALF_OPEN after timeout");
+        assertTrue(cb.tryAcquireProbe(), "breaker should transition to HALF_OPEN after timeout");
 
         cb.recordFailure(); // HALF_OPEN -> OPEN
 

@@ -10,8 +10,10 @@
 package cloud.dnation.jenkins.plugins.hetzner;
 
 import cloud.dnation.jenkins.plugins.hetzner.launcher.AbstractHetznerSshConnector;
+import cloud.dnation.jenkins.plugins.hetzner.metrics.HetznerMetricProvider;
 import com.google.common.collect.Lists;
 import hudson.model.labels.LabelAtom;
+import io.prometheus.client.CollectorRegistry;
 import jenkins.model.Jenkins;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +24,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -30,6 +33,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -63,12 +67,17 @@ class NodeCallableRetryTest {
 
         DcHealthTracker.resetAll();
         TemplateErrorTracker.resetAll();
+        // v103.percona.26: reset metric counters so the new tests asserting
+        // PROVISION_ATTEMPTS{outcome="dc_breaker_open"} are not polluted by
+        // counter values from other tests in this class.
+        HetznerMetricProvider.resetForTest();
     }
 
     @AfterEach
     void tearDown() {
         DcHealthTracker.resetAll();
         TemplateErrorTracker.resetAll();
+        HetznerMetricProvider.resetForTest();
         apiClientMock.close();
         jenkinsMock.close();
         rsrcMgrMock.close();
@@ -411,6 +420,155 @@ class NodeCallableRetryTest {
         // compatibility check refused failover).
         assertEquals(1, DcHealthTracker.getBreaker("fsn1", "amd64").getConsecutiveFailures());
         assertEquals(0, DcHealthTracker.getBreaker("nbg1", "amd64").getConsecutiveFailures());
+    }
+
+    /**
+     * v103.percona.26: per-template breaker gate. When a template's
+     * (location, arch) breaker is OPEN at iteration time (it opened
+     * AFTER the cloud-level filter in HetznerCloud.provision()),
+     * NodeCallable must skip createServer for that template and account
+     * the skip in PROVISION_ATTEMPTS{outcome="dc_breaker_open"}.
+     */
+    @Test
+    void breakerOpenSkipsTemplate() throws Exception {
+        AbstractHetznerSshConnector connector = sharedConnector();
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1", connector);
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1", connector);
+        HetznerServerTemplate t3 = makeTemplate("t3", "hel1", connector);
+        HetznerCloud cloud = new HetznerCloud("hcloud-01", "mock-cred", "10",
+                Lists.newArrayList(t1, t2, t3));
+
+        // Pre-trip t2's (nbg1, amd64) breaker so it is OPEN before NodeCallable starts.
+        DcHealthTracker.recordFailure("nbg1", "amd64");
+        DcHealthTracker.recordFailure("nbg1", "amd64");
+
+        HetznerServerAgent agent = mock(HetznerServerAgent.class);
+        when(agent.getTemplate()).thenReturn(t1);
+        when(agent.getComputer()).thenReturn(null);
+
+        when(mgr.createServer(any(), any())).thenThrow(
+                new HetznerProvisioningException("DC full", 422, "resource_unavailable", "anywhere"));
+
+        List<HetznerServerTemplate> ranked = List.of(t1, t2, t3);
+        NodeCallable callable = new NodeCallable(agent, cloud, ranked);
+
+        assertThrows(HetznerProvisioningException.class, callable::call);
+
+        // t1 was tried (and failed); t2 was SKIPPED by the gate (no createServer call);
+        // t3 was tried (failover from t1, because t2 was skipped).
+        verify(mgr, times(1)).createServer(any(), eq(t1));
+        verify(mgr, never()).createServer(any(), eq(t2));
+        verify(mgr, times(1)).createServer(any(), eq(t3));
+
+        // PROVISION_ATTEMPTS{outcome="dc_breaker_open"} incremented for t2.
+        Double skip = CollectorRegistry.defaultRegistry.getSampleValue(
+                "hetzner_provision_attempts_total",
+                new String[]{"cloud", "template", "outcome"},
+                new String[]{"hcloud-01", "t2", HetznerMetricProvider.OUTCOME_DC_BREAKER_OPEN});
+        assertNotNull(skip, "dc_breaker_open attempt counter must increment for t2");
+        assertEquals(1.0, skip, 0.0001);
+    }
+
+    /**
+     * v103.percona.26: when every template's breaker is OPEN at iteration
+     * time, NodeCallable skips them all and throws IllegalStateException
+     * ("No templates available for provisioning") without any
+     * createServer call.
+     */
+    @Test
+    void breakerOpenAllSkippedThrowsIllegalState() {
+        AbstractHetznerSshConnector connector = sharedConnector();
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1", connector);
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1", connector);
+        HetznerServerTemplate t3 = makeTemplate("t3", "hel1", connector);
+        HetznerCloud cloud = new HetznerCloud("hcloud-01", "mock-cred", "10",
+                Lists.newArrayList(t1, t2, t3));
+
+        // Open all three (location, amd64) breakers
+        for (String dc : new String[]{"fsn1", "nbg1", "hel1"}) {
+            DcHealthTracker.recordFailure(dc, "amd64");
+            DcHealthTracker.recordFailure(dc, "amd64");
+        }
+
+        HetznerServerAgent agent = mock(HetznerServerAgent.class);
+        when(agent.getTemplate()).thenReturn(t1);
+        when(agent.getComputer()).thenReturn(null);
+
+        List<HetznerServerTemplate> ranked = List.of(t1, t2, t3);
+        NodeCallable callable = new NodeCallable(agent, cloud, ranked);
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class, callable::call);
+        assertTrue(ex.getMessage().contains("No templates available"),
+                "expected 'No templates available' exception; got: " + ex.getMessage());
+
+        // Critical: ZERO createServer calls. This is the storm-prevention invariant.
+        verify(mgr, never()).createServer(any(), any());
+
+        // dc_breaker_open incremented once per template
+        for (String name : new String[]{"t1", "t2", "t3"}) {
+            Double skip = CollectorRegistry.defaultRegistry.getSampleValue(
+                    "hetzner_provision_attempts_total",
+                    new String[]{"cloud", "template", "outcome"},
+                    new String[]{"hcloud-01", name, HetznerMetricProvider.OUTCOME_DC_BREAKER_OPEN});
+            assertNotNull(skip, "dc_breaker_open must fire for " + name);
+            assertEquals(1.0, skip, 0.0001);
+        }
+    }
+
+    /**
+     * v103.percona.26: when a template is skipped because its breaker is
+     * OPEN, advancing to the NEXT template still requires
+     * isFailoverCompatibleWith. Mismatched connector credentials must not
+     * cause a wrong-metadata bootstrap. Mirrors the existing
+     * {@code failoverRefusedWhenTemplateIncompatible} test, but for the
+     * breaker-gate skip path.
+     */
+    @Test
+    void breakerOpenSkipRespectsFailoverCompat() {
+        // t1 uses connA (cred-A); t2 uses connB (cred-B) -> incompatible
+        AbstractHetznerSshConnector connA = mock(AbstractHetznerSshConnector.class);
+        when(connA.getSshCredentialsId()).thenReturn("cred-A");
+        when(connA.getSshPort()).thenReturn(22);
+        AbstractHetznerSshConnector connB = mock(AbstractHetznerSshConnector.class);
+        when(connB.getSshCredentialsId()).thenReturn("cred-B");
+        when(connB.getSshPort()).thenReturn(22);
+
+        HetznerServerTemplate t1 = makeTemplate("t1", "fsn1", connA);
+        HetznerServerTemplate t2 = makeTemplate("t2", "nbg1", connB);
+        HetznerCloud cloud = new HetznerCloud("hcloud-01", "mock-cred", "10",
+                Lists.newArrayList(t1, t2));
+
+        // Trip t1's breaker so NodeCallable will try to skip+advance to t2.
+        DcHealthTracker.recordFailure("fsn1", "amd64");
+        DcHealthTracker.recordFailure("fsn1", "amd64");
+
+        HetznerServerAgent agent = mock(HetznerServerAgent.class);
+        when(agent.getTemplate()).thenReturn(t1);
+        when(agent.getComputer()).thenReturn(null);
+
+        List<HetznerServerTemplate> ranked = List.of(t1, t2);
+        NodeCallable callable = new NodeCallable(agent, cloud, ranked);
+
+        assertThrows(Exception.class, callable::call);
+
+        // t1 was skipped (breaker open); t2 must NOT have been attempted
+        // because the failover-compat check refused the advance.
+        verify(mgr, never()).createServer(any(), eq(t1));
+        verify(mgr, never()).createServer(any(), eq(t2));
+
+        // Both counters fire: dc_breaker_open for t1 AND failover_incompatible for t1.
+        Double brOpen = CollectorRegistry.defaultRegistry.getSampleValue(
+                "hetzner_provision_attempts_total",
+                new String[]{"cloud", "template", "outcome"},
+                new String[]{"hcloud-01", "t1", HetznerMetricProvider.OUTCOME_DC_BREAKER_OPEN});
+        assertNotNull(brOpen);
+        assertEquals(1.0, brOpen, 0.0001);
+        Double failInc = CollectorRegistry.defaultRegistry.getSampleValue(
+                "hetzner_provision_attempts_total",
+                new String[]{"cloud", "template", "outcome"},
+                new String[]{"hcloud-01", "t1", HetznerMetricProvider.OUTCOME_FAILOVER_INCOMPATIBLE});
+        assertNotNull(failInc, "failover-incompatible counter must fire when skip-advance is refused");
+        assertEquals(1.0, failInc, 0.0001);
     }
 
     /**

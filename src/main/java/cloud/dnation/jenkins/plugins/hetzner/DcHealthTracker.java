@@ -181,9 +181,69 @@ public class DcHealthTracker {
         save();
     }
 
-    /** Check if (location, arch) is currently considered healthy. */
+    /**
+     * Non-consuming health query: would this (location, arch) breaker
+     * accept a probe right now? CLOSED -> yes. OPEN with timeout
+     * elapsed -> yes (lazily transitions to HALF_OPEN). HALF_OPEN with
+     * lease available -> yes. Used by {@link #filterHealthy} and
+     * {@link #sortByHealth}; does NOT consume the HALF_OPEN probe lease.
+     * v103.percona.26: previously consumed the lease, which made the
+     * filter pass steal the probe from the actual provisioner.
+     */
     static boolean isHealthy(String location, String arch) {
-        return getBreaker(location, arch).isHealthy();
+        return getBreaker(location, arch).isProbeable();
+    }
+
+    /**
+     * Overload: non-consuming health query for a template. v103.percona.26.
+     */
+    static boolean isHealthy(HetznerServerTemplate template) {
+        return isHealthy(template.getLocation(),
+                HetznerMetricProvider.archOf(template.getServerType()));
+    }
+
+    /**
+     * Consuming probe-lease acquisition: returns true exactly once per
+     * HALF_OPEN window, and always for CLOSED. Called at the actual API
+     * attempt site ({@link cloud.dnation.jenkins.plugins.hetzner.NodeCallable})
+     * so the lease is held by the provisioner that will actually call
+     * {@code createServer}, not by an earlier filter or sort pass.
+     * v103.percona.26.
+     */
+    static boolean tryAcquireProbe(String location, String arch) {
+        return getBreaker(location, arch).tryAcquireProbe();
+    }
+
+    /** Overload: consuming probe-lease acquisition for a template. */
+    static boolean tryAcquireProbe(HetznerServerTemplate template) {
+        return tryAcquireProbe(template.getLocation(),
+                HetznerMetricProvider.archOf(template.getServerType()));
+    }
+
+    /**
+     * Return only templates whose (location, arch) DC breaker is currently
+     * healthy. v103.percona.26. Used as the entry-point storm gate in
+     * {@link cloud.dnation.jenkins.plugins.hetzner.HetznerCloud#provision},
+     * which must NOT call {@code fetchAllServers} / {@code createServer}
+     * against templates whose DCs are OPEN.
+     *
+     * <p>Distinct from {@link #sortByHealth(List)}, which keeps unhealthy
+     * templates at the tail for diagnostic visibility. Both are kept;
+     * filterHealthy is the storm-gate, sortByHealth is the rank hint inside
+     * NodeCallable's failover loop.
+     *
+     * @param templates list of matching templates (caller-provided)
+     * @return new list containing only currently-healthy templates; never
+     *         modifies input, returns empty (never null) for null/empty
+     *         input or when no template is healthy.
+     */
+    static List<HetznerServerTemplate> filterHealthy(List<HetznerServerTemplate> templates) {
+        if (templates == null || templates.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return templates.stream()
+                .filter(DcHealthTracker::isHealthy)
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     /**

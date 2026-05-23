@@ -311,7 +311,8 @@ public class HetznerCloud extends AbstractCloudImpl {
             while (excessWorkload > 0) {
                 if (jenkinsInstance.isQuietingDown() || jenkinsInstance.isTerminating()) {
                     log.warn("Jenkins is going down, no new nodes will be provisioned");
-                    HetznerMetricProvider.PROVISION_SKIPPED.labels(name, "jenkins_quieting").inc();
+                    HetznerMetricProvider.PROVISION_SKIPPED.labels(
+                            name, HetznerMetricProvider.REASON_JENKINS_QUIETING).inc();
                     break;
                 }
                 HetznerApiClient apiClient = HetznerApiClient.forCredentials(credentialsId);
@@ -319,7 +320,32 @@ public class HetznerCloud extends AbstractCloudImpl {
                     log.warn("Hetzner API token rate-limited, suppressing provisioning for cloud '{}' "
                             + "(remaining={}, resets in {}s)",
                             name, apiClient.getRemaining(), apiClient.timeUntilReset().toSeconds());
-                    HetznerMetricProvider.PROVISION_SKIPPED.labels(name, "rate_limited").inc();
+                    HetznerMetricProvider.PROVISION_SKIPPED.labels(
+                            name, HetznerMetricProvider.REASON_RATE_LIMITED).inc();
+                    break;
+                }
+                // v103.percona.26: filter to templates whose (location, arch)
+                // DC breaker is currently healthy. Done BEFORE effectiveNodeCount()
+                // so we do not call fetchAllServers() when there is no
+                // capacity to provision into. The 2026-05-22 incident drove
+                // ~35 req/min of fetchAllServers + createServer at ps80 while
+                // all 3 arm64 DCs were OPEN; this gate closes that path.
+                // Re-evaluated every loop iteration so a breaker that opens
+                // during this provision() call still short-circuits subsequent
+                // iterations.
+                final List<HetznerServerTemplate> healthyTemplates =
+                        DcHealthTracker.filterHealthy(matchingTemplates);
+                if (healthyTemplates.isEmpty()) {
+                    String openCells = matchingTemplates.stream()
+                            .map(t -> t.getLocation() + "/"
+                                    + HetznerMetricProvider.archOf(t.getServerType()))
+                            .distinct()
+                            .collect(Collectors.joining(","));
+                    log.warn("All matching DCs have OPEN breakers; suppressing provisioning "
+                            + "for cloud '{}' label '{}' (open_cells: {})",
+                            name, state.getLabel(), openCells);
+                    HetznerMetricProvider.PROVISION_SKIPPED.labels(
+                            name, HetznerMetricProvider.REASON_NO_HEALTHY_DC).inc();
                     break;
                 }
                 int running = effectiveNodeCount();
@@ -328,13 +354,14 @@ public class HetznerCloud extends AbstractCloudImpl {
                 // INSTANCE_CAP is published from publishConfigMetrics() at
                 // readResolve() -- not on the hot path. Cap doesn't change
                 // between provision() calls, so a per-call set() is wasted work.
-                final List<HetznerServerTemplate> rankedTemplates = rankTemplatesByHealth(matchingTemplates);
+                final List<HetznerServerTemplate> rankedTemplates = rankTemplatesByHealth(healthyTemplates);
                 final HetznerServerTemplate template = rankedTemplates.get(0);
                 if (TemplateErrorTracker.isSuppressed(template.getName())) {
                     log.warn("Template '{}' suppressed due to recurring config errors "
                             + "(image={}). Provisioning skipped; fix template config "
                             + "or check Hetzner changelog.", template.getName(), template.getImage());
-                    HetznerMetricProvider.PROVISION_SKIPPED.labels(name, "template_suppressed").inc();
+                    HetznerMetricProvider.PROVISION_SKIPPED.labels(
+                            name, HetznerMetricProvider.REASON_TEMPLATE_SUPPRESSED).inc();
                     break;
                 }
                 log.info("Creating new agent with {} executors, have {} running VMs "
@@ -344,7 +371,8 @@ public class HetznerCloud extends AbstractCloudImpl {
                     log.warn("Cloud capacity reached ({}). Has {} VMs running+pending, "
                             + "but want {} more executors",
                             instanceCap, running, excessWorkload);
-                    HetznerMetricProvider.PROVISION_SKIPPED.labels(name, "cap_reached").inc();
+                    HetznerMetricProvider.PROVISION_SKIPPED.labels(
+                            name, HetznerMetricProvider.REASON_CAP_REACHED).inc();
                     break;
                 } else {
                     ensurePendingProvisions().incrementAndGet();

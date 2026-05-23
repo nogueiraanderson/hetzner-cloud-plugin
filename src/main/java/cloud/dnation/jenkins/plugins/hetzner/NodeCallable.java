@@ -76,6 +76,44 @@ class NodeCallable implements Callable<Node> {
                 // breaker for the same DC. archOf() returns the canonical
                 // "amd64" / "arm64" / "unknown" bucket.
                 String arch = HetznerMetricProvider.archOf(template.getServerType());
+                // v103.percona.26: per-template breaker gate. The cloud-
+                // level filter in HetznerCloud.provision() already dropped
+                // templates whose breakers were open at provision() time,
+                // but a breaker can OPEN between that filter and this loop
+                // (e.g. an earlier template in this very iteration just
+                // tripped its DC). Use tryAcquireProbe to CONSUME the
+                // HALF_OPEN probe lease at the actual API attempt site;
+                // the upstream filter uses the non-consuming isHealthy()
+                // peek so it cannot steal the probe before we get here.
+                if (!DcHealthTracker.tryAcquireProbe(template)) {
+                    HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
+                            cloud.name, template.getName(),
+                            HetznerMetricProvider.OUTCOME_DC_BREAKER_OPEN).inc();
+                    log.info("Skipping template '{}' (dc={}, arch={}): "
+                            + "breaker OPEN at iteration time",
+                            template.getName(), location, arch);
+                    // Advancing to the next template still requires the
+                    // existing failover-compatibility check: a swap to a
+                    // template with mismatched labels / executors / connector
+                    // would create a server whose Jenkins-side metadata
+                    // is wrong (same gate as the catch block at line 171).
+                    if (i < rankedTemplates.size() - 1) {
+                        HetznerServerTemplate next = rankedTemplates.get(i + 1);
+                        HetznerServerTemplate baseline = agent.getTemplate();
+                        if (baseline != null && !baseline.isFailoverCompatibleWith(next)) {
+                            log.warn("DC failover aborted (breaker-gate skip) -- next template is not "
+                                    + "failover-compatible (cloud={}, template={}, dc={}, "
+                                    + "next_template={}, next_dc={})",
+                                    cloud.name, baseline.getName(), location,
+                                    next.getName(), next.getLocation());
+                            HetznerMetricProvider.PROVISION_ATTEMPTS.labels(
+                                    cloud.name, template.getName(),
+                                    HetznerMetricProvider.OUTCOME_FAILOVER_INCOMPATIBLE).inc();
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 try {
                     Node result = doProvisionAndTime(template);
                     DcHealthTracker.recordSuccess(location, arch);

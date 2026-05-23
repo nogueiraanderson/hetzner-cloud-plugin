@@ -189,6 +189,13 @@ public final class HetznerMetricProvider {
      * unexpected runtime). NOT recorded as a DC failure.
      */
     public static final String OUTCOME_BOOTSTRAP_OTHER = "bootstrap_other";
+    /**
+     * Per-template breaker gate inside {@code NodeCallable.call()} found the
+     * template's (location, arch) breaker OPEN between {@code HetznerCloud
+     * .provision()}'s filter and the per-template iteration; the
+     * {@code createServer} call was skipped. v103.percona.26.
+     */
+    public static final String OUTCOME_DC_BREAKER_OPEN = "dc_breaker_open";
 
     /**
      * Pre-check / precheck failure: an outcome that exited before any real
@@ -210,7 +217,8 @@ public final class HetznerMetricProvider {
             OUTCOME_UNCLASSIFIED_THROTTLE,
             OUTCOME_CONFIG_ERROR,
             OUTCOME_CAP_REACHED_UNDER_LOCK,
-            OUTCOME_FAILOVER_INCOMPATIBLE
+            OUTCOME_FAILOVER_INCOMPATIBLE,
+            OUTCOME_DC_BREAKER_OPEN
     );
 
     /**
@@ -229,13 +237,48 @@ public final class HetznerMetricProvider {
             OUTCOME_DC_ATTRIBUTABLE,
             OUTCOME_FAILURE,
             OUTCOME_BOOTSTRAP_IO,
-            OUTCOME_BOOTSTRAP_OTHER
+            OUTCOME_BOOTSTRAP_OTHER,
+            OUTCOME_DC_BREAKER_OPEN
+    );
+
+    // PROVISION_SKIPPED reasons.  v103.percona.26 introduces the constant
+    // family (previously inline string literals at the four call sites in
+    // HetznerCloud.provision()) and adds REASON_NO_HEALTHY_DC for the new
+    // all-DC-breakers-open gate.
+    /** Jenkins is quieting down or terminating; no new provisions. */
+    public static final String REASON_JENKINS_QUIETING = "jenkins_quieting";
+    /** Hetzner API token is rate-limited (per-token budget exhausted). */
+    public static final String REASON_RATE_LIMITED = "rate_limited";
+    /** Template was suppressed by {@link cloud.dnation.jenkins.plugins.hetzner.TemplateErrorTracker}. */
+    public static final String REASON_TEMPLATE_SUPPRESSED = "template_suppressed";
+    /** Cloud-level instance cap reached. */
+    public static final String REASON_CAP_REACHED = "cap_reached";
+    /**
+     * All matching templates' (location, arch) DC breakers were OPEN at
+     * the time {@code HetznerCloud.provision()} ran. v103.percona.26.
+     * Closes the storm path where the plugin kept hammering Hetzner with
+     * {@code fetchAllServers} + {@code createServer} for templates whose
+     * DCs had no capacity (see 2026-05-22 cax arm64 shortage incident).
+     */
+    public static final String REASON_NO_HEALTHY_DC = "no_healthy_dc";
+
+    /**
+     * Authoritative enumeration of {@link #PROVISION_SKIPPED} reasons.
+     * Tests assert that every emit site uses a value from this set;
+     * dashboards / alerting rules should be cross-checked against it.
+     */
+    public static final java.util.Set<String> ALL_PROVISION_SKIPPED_REASONS = java.util.Set.of(
+            REASON_JENKINS_QUIETING,
+            REASON_RATE_LIMITED,
+            REASON_TEMPLATE_SUPPRESSED,
+            REASON_CAP_REACHED,
+            REASON_NO_HEALTHY_DC
     );
 
     /**
      * Provisioning short-circuited before submitting a NodeCallable.
-     * {@code reason} is one of: {@code cap_reached}, {@code rate_limited},
-     * {@code jenkins_quieting}, {@code template_suppressed}.
+     * {@code reason} is one of the constants in
+     * {@link #ALL_PROVISION_SKIPPED_REASONS}.
      */
     public static final Counter PROVISION_SKIPPED = Counter.build()
             .name("hetzner_provision_skipped_total")
@@ -342,6 +385,19 @@ public final class HetznerMetricProvider {
     public static final Counter DC_HEALTH_STALE_OPEN_RESETS = Counter.build()
             .name("hetzner_dc_health_stale_open_resets_total")
             .help("DC breakers reset from OPEN to CLOSED on load due to stale-OPEN TTL")
+            .labelNames("location", "arch")
+            .register();
+
+    /**
+     * Breakers whose {@code HALF_OPEN} probe lease was re-armed because no
+     * outcome was recorded within the stale-HALF_OPEN TTL. Indicates a
+     * probe-holder that consumed the lease but died (or hit a non-DC code
+     * path that did not call recordSuccess/recordFailure) without
+     * releasing it. v103.percona.26.
+     */
+    public static final Counter DC_HEALTH_STALE_HALF_OPEN_RESETS = Counter.build()
+            .name("hetzner_dc_health_stale_half_open_resets_total")
+            .help("HALF_OPEN probe leases re-armed because the holder did not record an outcome in time")
             .labelNames("location", "arch")
             .register();
 
@@ -871,6 +927,7 @@ public final class HetznerMetricProvider {
         DC_HEALTH_SAVES.clear();
         DC_HEALTH_SAVE_FAILURES.clear();
         DC_HEALTH_STALE_OPEN_RESETS.clear();
+        DC_HEALTH_STALE_HALF_OPEN_RESETS.clear();
         DC_HEALTH_LEGACY_KEYS_MIGRATED.clear();
         REHYDRATED_WORKERS.clear();
         REHYDRATE_ATTEMPTS.clear();

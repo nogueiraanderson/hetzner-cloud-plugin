@@ -73,9 +73,34 @@ class HetznerMetricProviderTest {
                 .contains(HetznerMetricProvider.OUTCOME_BOOTSTRAP_IO));
         assertTrue(HetznerMetricProvider.ALL_PROVISION_OUTCOMES
                 .contains(HetznerMetricProvider.OUTCOME_BOOTSTRAP_OTHER));
-        // 11 attempt outcomes; OUTCOME_PRECHECK_FAILURE lives on the duration
-        // histogram only, not on PROVISION_ATTEMPTS.
-        assertEquals(11, HetznerMetricProvider.ALL_PROVISION_OUTCOMES.size());
+        assertTrue(HetznerMetricProvider.ALL_PROVISION_OUTCOMES
+                .contains(HetznerMetricProvider.OUTCOME_DC_BREAKER_OPEN),
+                "v103.percona.26: dc_breaker_open must be in ALL_PROVISION_OUTCOMES");
+        // 12 attempt outcomes (v26 added dc_breaker_open); OUTCOME_PRECHECK_FAILURE
+        // lives on the duration histogram only, not on PROVISION_ATTEMPTS.
+        assertEquals(12, HetznerMetricProvider.ALL_PROVISION_OUTCOMES.size());
+    }
+
+    /**
+     * v103.percona.26: lock down the PROVISION_SKIPPED reasons enumeration.
+     * Mirrors the outcome-enumeration invariant: every {@code reason} value
+     * emitted on PROVISION_SKIPPED MUST be one of the REASON_* constants
+     * exposed on the provider.
+     */
+    @Test
+    void provisionSkippedReasonsEnumerationIsExhaustive() {
+        assertTrue(HetznerMetricProvider.ALL_PROVISION_SKIPPED_REASONS
+                .contains(HetznerMetricProvider.REASON_JENKINS_QUIETING));
+        assertTrue(HetznerMetricProvider.ALL_PROVISION_SKIPPED_REASONS
+                .contains(HetznerMetricProvider.REASON_RATE_LIMITED));
+        assertTrue(HetznerMetricProvider.ALL_PROVISION_SKIPPED_REASONS
+                .contains(HetznerMetricProvider.REASON_TEMPLATE_SUPPRESSED));
+        assertTrue(HetznerMetricProvider.ALL_PROVISION_SKIPPED_REASONS
+                .contains(HetznerMetricProvider.REASON_CAP_REACHED));
+        assertTrue(HetznerMetricProvider.ALL_PROVISION_SKIPPED_REASONS
+                .contains(HetznerMetricProvider.REASON_NO_HEALTHY_DC));
+        assertEquals(5, HetznerMetricProvider.ALL_PROVISION_SKIPPED_REASONS.size(),
+                "5 reasons: jenkins_quieting, rate_limited, template_suppressed, cap_reached, no_healthy_dc");
     }
 
     @Test
