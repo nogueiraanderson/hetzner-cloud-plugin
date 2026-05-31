@@ -16,7 +16,11 @@
 
 # Hetzner Cloud Plugin for Jenkins (Percona patched fork)
 
-Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness, rate-limiting, retry, and DC failover patches. Current version: **v103.percona.26**. All patch details and per-version release notes are in **[CHANGELOG.md](CHANGELOG.md)**.
+Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness, rate-limiting, retry, and DC failover patches. Current version: **v103.percona.26**.
+
+## Percona patches
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete list of patches and per-version release notes.
 
 ## Build
 
