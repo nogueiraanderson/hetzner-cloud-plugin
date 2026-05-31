@@ -304,6 +304,22 @@ Phase 4a of the ps3 canary resilience plan ([PS-11173](https://perconadev.atlass
 - `hetzner_dc_health_save_failures_total` (counter) - failed writes; non-zero rate is operationally actionable.
 - `hetzner_dc_health_stale_open_resets_total{location}` (counter) - breakers reset from OPEN to CLOSED on load due to the 30-min stale-OPEN TTL.
 
+## v103.percona.20 (2026-05-18)
+
+Deduplicate server entries from paged Hetzner API responses.
+
+### Fixed
+
+- `HetznerCloudResourceManager.fetchAllServers()` deduplicates servers by ID across pages. The upstream API can return the same server in multiple pages during concurrent list + modify operations; duplicate entries inflated `hetzner_running_servers` and caused `OrphanedNodesCleaner` to attempt double-termination of the same VM.
+
+## v103.percona.19 (2026-05-18)
+
+Extract `Run` from `PlaceholderExecutable` for Pipeline hung-build detection.
+
+### Fixed
+
+- `HungBuildDetector` now unwraps `PlaceholderExecutable` (the Jenkins Pipeline step executor wrapper) to reach the underlying `Run.isBuilding()` check. Without this, Pipeline builds were invisible to the detector and stuck Pipeline builds could run indefinitely without incrementing `hetzner_stuck_builds_total`.
+
 ## v103.percona.18 (2026-05-18)
 
 Codex review follow-up on v103.percona.17. The new `HungBuildDetector` and its three metrics shipped to ps3.cd as a canary; the review surfaced two correctness blockers and one observability fault that would have made fleet rollout silently misleading. v18 fixes all four before promoting beyond ps3.
@@ -398,6 +414,24 @@ Wait for cloud-init to finish before launching the remoting JVM.
 - Outer bound is unchanged: `NodeCallable.doProvision` still wraps `computer.connect(false)` in a Future bounded by the template's `bootDeadline` minutes.
 - A long-term follow-up is to pre-bake a Hetzner snapshot with java/docker/awscli installed; that is orthogonal to this fix and will reduce provisioning latency by the cloud-init `modules-final` time on top of fixing the race.
 
+## v103.percona.13 (2026-05-11)
+
+Justfile pin bump.
+
+### Changed
+
+- Bumped justfile `version` pin to `103.percona.13`. No code changes.
+
+## v103.percona.12 (2026-05-12)
+
+`NodeCallable` hardening and metrics endpoint follow-ups.
+
+### Fixed
+
+- `NodeCallable`: loopback IP gate prevents connecting to a server whose address resolves to 127.x.
+- DC health gate added at `NodeCallable.call()` entry (belt-and-suspenders alongside the `provision()` pre-check from v3).
+- Provisioning outcome enum extended; metrics endpoint loopback follow-ups from v9/v10 review.
+
 ## v103.percona.11 (2026-05-08)
 
 Make `/hetzner-prometheus` an `UnprotectedRootAction` so anonymous loopback callers are not blocked by Jenkins core authorization.
@@ -420,6 +454,42 @@ Drop SYSTEM_READ permission gate on `/hetzner-prometheus` for the push-model rol
 ### Context
 - Companion repo: `nogueiraanderson/percona-ci-platform` (alloy-gateway addon).
 - Supersedes the prior plan that ran a `prom-scraper-svc` Jenkins user with API-token basic auth for in-cluster Prometheus to scrape this endpoint over public DNS.
+
+## v103.percona.9 (2026-05-07)
+
+Self-contained `/hetzner-prometheus` Stapler endpoint (PS-10997 Phase 1).
+
+### Added
+
+- `HetznerPrometheusEndpoint` (`RootAction` at `/hetzner-prometheus`): exposes 40+ `hetzner_*` metric families (DC circuit breaker state, provisioning latency, API rate-limit headroom, CRW iterations, template suppression, anomaly counters) in Prometheus 0.0.4 text format.
+- `io.prometheus:simpleclient` bundled directly in the plugin, no dependency on the community `prometheus-plugin` (fleet audit: 0/10 masters had it installed).
+- `HetznerMetricProvider`: registers all `hetzner_*` collectors against `CollectorRegistry.defaultRegistry`.
+
+## v103.percona.8 (2026-05-07)
+
+Initial Prometheus metrics scaffolding (PS-10997).
+
+### Added
+
+- Initial `hetzner_*` metric definitions and `HetznerMetricProvider` scaffolding: exposes plugin state (provisioning counts, rate-limit headroom, DC breaker state) via Prometheus gauges/counters. Superseded by the self-contained endpoint in v9.
+
+## v103.percona.7 (2026-04-07)
+
+SSH retry backoff, log level fixes, and robustness cleanups.
+
+### Fixed
+
+- SSH launcher: retry backoff for transient connection failures during agent launch, reducing spurious bootstrap failures on VMs with slow SSH startup.
+- Noisy log entries lowered to DEBUG; improved context in error messages across the provisioning path.
+- Miscellaneous null guards and defensive catches in the boot and teardown paths.
+
+## v103.percona.6 (2026-04-07)
+
+Rate-limit code review follow-ups.
+
+### Fixed
+
+- Addressed Codex static analysis findings on `HetznerApiClient` and `RateLimitInterceptor` (v4): missing null checks, rate-limit state transition clarity, exception message alignment with the v1 convention.
 
 ## v103.percona.5 (2026-04-01)
 

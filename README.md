@@ -18,116 +18,42 @@
 
 Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness, rate-limiting, retry, and DC failover patches.
 
-Current version: **v103.percona.14**.
+Current version: **v103.percona.26**.
 
-For older releases (v103.percona.1 through v103.percona.8), see [`CHANGELOG.md`](CHANGELOG.md).
+Full release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Percona patches
 
-### v103.percona.14: Wait for cloud-init before launching remoting JVM
+| Version | Summary |
+|---------|---------|
+| [v103.percona.26](CHANGELOG.md#v103percona26-2026-05-23) | Filter OPEN-breaker API storm; HALF_OPEN single-probe lease prevents concurrent stampede |
+| [v103.percona.25](CHANGELOG.md#v103percona25-2026-05-21) | Per-arch DC circuit breakers; `HetznerCloud` transient-field rehydration via `readResolve()` |
+| [v103.percona.24](CHANGELOG.md#v103percona24-2026-05-20) | Lazy-emit `arch=unknown` series only when a non-canonical SKU is observed |
+| [v103.percona.23](CHANGELOG.md#v103percona23-2026-05-20) | `arch` label (`amd64`/`arm64`/`unknown`) on `hetzner_running_servers` and `hetzner_orphan_servers_reaped_total` |
+| [v103.percona.22](CHANGELOG.md#v103percona22-2026-05-19) | Worker rehydration on master restart: re-adopt surviving Hetzner VMs as Jenkins agents (feature-flagged) |
+| [v103.percona.21](CHANGELOG.md#v103percona21-2026-05-19) | Persist DC circuit-breaker state to disk; stale-OPEN TTL clears old incidents on load |
+| [v103.percona.20](CHANGELOG.md#v103percona20-2026-05-18) | Deduplicate server entries from paged Hetzner API responses |
+| [v103.percona.19](CHANGELOG.md#v103percona19-2026-05-18) | Hung-build detection: extract `Run` from Pipeline `PlaceholderExecutable` |
+| [v103.percona.18](CHANGELOG.md#v103percona18-2026-05-18) | `HungBuildDetector` correctness: synchronized scan, stale gauge cleanup, drop in-plugin `master` label |
+| [v103.percona.17](CHANGELOG.md#v103percona17-2026-05-16) | `HungBuildDetector` with `hetzner_stuck_builds_total`, `hetzner_oldest_build_age_seconds`, real-busy executor gauge |
+| [v103.percona.16](CHANGELOG.md#v103percona16-2026-05-15) | `HetznerMetricsRefresher` (PeriodicWork): prevent `hetzner_running_servers` from pinning on idle clouds |
+| [v103.percona.15](CHANGELOG.md#v103percona15-2026-05-15) | `hetzner_plugin_info.jenkins_version` reads live `Jenkins.getVersion()` instead of hard-coded `"2.479"` |
+| [v103.percona.14](CHANGELOG.md#v103percona14-2026-05-12) | Wait for `cloud-init` + `java` before exec'ing remoting JVM; fixes `bootstrap_io` on stock images |
+| [v103.percona.13](CHANGELOG.md#v103percona13-2026-05-11) | Justfile pin bump |
+| [v103.percona.12](CHANGELOG.md#v103percona12-2026-05-12) | `NodeCallable` hardening, loopback gate, outcome enum, DC health gate |
+| [v103.percona.11](CHANGELOG.md#v103percona11-2026-05-08) | `UnprotectedRootAction` on `/hetzner-prometheus`; enables anonymous loopback scrape by Alloy |
+| [v103.percona.10](CHANGELOG.md#v103percona10-2026-05-07) | Drop `SYSTEM_READ` permission gate inside `HetznerPrometheusEndpoint.doIndex()` |
+| [v103.percona.9](CHANGELOG.md#v103percona9-2026-05-07) | Self-contained `/hetzner-prometheus` Stapler endpoint; bundles `simpleclient` (PS-10997 Phase 1) |
+| [v103.percona.8](CHANGELOG.md#v103percona8-2026-05-07) | Initial Prometheus metrics scaffolding (PS-10997) |
+| [v103.percona.7](CHANGELOG.md#v103percona7-2026-04-07) | SSH retry backoff, log level fixes, robustness cleanups |
+| [v103.percona.6](CHANGELOG.md#v103percona6-2026-04-07) | Rate-limit code review follow-ups |
+| [v103.percona.5](CHANGELOG.md#v103percona5-2026-04-01) | `RetryInterceptor` (exponential backoff + jitter) and `TemplateErrorTracker` (30-min suppression) |
+| [v103.percona.4](CHANGELOG.md#v103percona4-2026-03-22) | `HetznerApiClient` per-token client; `RateLimitInterceptor`; Guava API caches (SSH keys, labels, server lists) |
+| [v103.percona.3](CHANGELOG.md#v103percona3-2026-03-19) | DC circuit breaker failover: `DcCircuitBreaker`, `DcHealthTracker`, `HetznerProvisioningException`, failover loop in `NodeCallable` |
+| [v103.percona.2](CHANGELOG.md#v103percona2-2026-03-19) | Architecture validation (`inferArchFromServerType`); launcher null-safety; deployment tooling |
+| [v103.percona.1](CHANGELOG.md#v103percona1-2026-03-19) | CRW timer death fix; bidirectional orphan cleanup; null-safe transient fields after deserialization |
 
-`HetznerServerComputerLauncher.getAgentCommand()` now wraps the remoting launch in a guard that calls `cloud-init status --wait` (when present) and verifies `java` is on PATH before `exec`'ing the JVM. On stock images (Hetzner debian-12, image id 114690387) the user-data script installs openjdk via apt during cloud-init's `modules-final` stage and can take 1-3 minutes to finish; the plugin previously SSHed in as soon as Hetzner reported `status="running"`, scped the launch script, and `exec`'d `java -jar remoting.jar` while apt was still unpacking openjdk. The channel EOFed instantly and the failure surfaced as `bootstrap_io`. Verified on pg.cd (hundreds of `EOFException: unexpected stream termination` at `HetznerServerComputerLauncher.launchAgent`) and reproduced on a cpx62 in pg.cd's private network: cloud-init `modules-final` took ~49 seconds, during which `which java` returned not-found while the plugin's launch was firing.
-
-Pre-baked images (no `cloud-init` on PATH and java already installed) skip the wait. The aarch64 snapshot path is unaffected. The outer `bootDeadline` future bound in `NodeCallable.doProvision` is unchanged, so a hung cloud-init is still cleaned up by the existing timeout.
-
-### v103.percona.11: Anonymous loopback metrics endpoint
-
-`HetznerPrometheusEndpoint` now `implements UnprotectedRootAction` instead of `RootAction`. v10 dropped the `Jenkins.SYSTEM_READ` check inside `doIndex`, but `GlobalMatrixAuthorizationStrategy` still rejected anonymous loopback callers with HTTP 403 before `doIndex` was reached. v11 makes the endpoint anonymous-readable so the master-side Grafana Alloy systemd unit can scrape `http://127.0.0.1:8080/hetzner-prometheus/` with no credentials. The trust boundary is the Jenkins 8080 loopback bind, not core ACLs. Required for ADR 0013 push-model rollout (PS-10997 Phase 2).
-
-### v103.percona.10: Drop SYSTEM_READ gate inside doIndex
-
-Removed the `Jenkins.get().checkPermission(Jenkins.SYSTEM_READ)` call inside `HetznerPrometheusEndpoint.doIndex()`. Necessary but not sufficient (see v11): the core authorization filter still gated anonymous callers. Kept for completeness; v11 supersedes.
-
-### v103.percona.9: Self-contained `/hetzner-prometheus` endpoint
-
-Stapler `RootAction` at `/hetzner-prometheus` exposes 40 `hetzner_*` metric families (DC circuit breaker state, provisioning latency, API rate-limit headroom, CRW iterations, template suppression, anomaly counters) in Prometheus 0.0.4 text format. Bundles `io.prometheus:simpleclient` directly, so the plugin does not depend on the Jenkins community `prometheus-plugin` (a fleet audit found 0/10 masters had it installed). PS-10997 Phase 1.
-
-| Component | Purpose |
-|-----------|---------|
-| `HetznerPrometheusEndpoint` | Stapler `RootAction` serving Prometheus 0.0.4 text format |
-| `HetznerMetricProvider` | Registers all `hetzner_*` collectors against `CollectorRegistry.defaultRegistry` |
-| `BundledSimpleClientPusher` | Single source for plugin-instrumentation metrics |
-
-### v103.percona.5: Retry and template error suppression
-
-OkHttp retry interceptor and template-level error tracking to handle transient API failures and suppress misconfigured templates.
-
-| Component | Purpose |
-|-----------|---------|
-| `RetryInterceptor` | OkHttp interceptor with exponential backoff and jitter for transient errors (429, 502, 504, socket timeouts) |
-| `TemplateErrorTracker` | Suppresses templates with persistent config errors (e.g., deprecated image IDs) |
-
-Behavior:
-- **Retry:** Max 3 retries with AWS-style full jitter. Honors `Retry-After` header for 429. Does not retry 401/403/404/409/422/500/503
-- **Template suppression:** 3-failure threshold suppresses a template for 30 minutes. Half-open probe on expiry allows a single attempt before re-suppressing
-- Config errors (`invalid_input`) abort DC failover immediately (not DC-scoped)
-- Rate-limit (429) during DC failover aborts the entire provisioning attempt (token-scoped, not DC-scoped)
-- Boot status polling skips API calls when rate-limited
-- Observability via Script Console: `TemplateErrorTracker.getStatus()`
-
-| File | Change |
-|------|--------|
-| `RetryInterceptor` | New: OkHttp interceptor with exponential backoff + jitter |
-| `TemplateErrorTracker` | New: per-template error tracking and suppression |
-| `NodeCallable.call()` | Config error detection, rate-limit abort during failover |
-| `HetznerCloud.provision()` | Check `TemplateErrorTracker.isSuppressed()` before using a template |
-
-### v103.percona.4: Rate-limit infrastructure and API caching
-
-Per-token API client with rate-limit awareness, response caching, and hardened exception handling.
-
-| Component | Purpose |
-|-----------|---------|
-| `HetznerApiClient` | Per-token API client wrapper with rate-limit state tracking and lazy auth |
-| `RateLimitInterceptor` | OkHttp interceptor parsing `RateLimit-Limit/Remaining/Reset` headers |
-| API caches | Guava caches for SSH keys (30min), label IDs (15min), server lists (30sec) |
-
-Behavior:
-- `checkRateLimit()` guard before API-intensive operations (`createServer`, `getOrCreateSshKey`, `fetchAllServers`)
-- Lazy auth via `AuthInterceptor` picks up token rotations immediately
-- HTTP 401 invalidates the cached client (supports token rotation)
-- Cache stats available via `HetznerCloudResourceManager.getCacheStats()` (Script Console)
-- `OrphanedNodesCleaner` skips cleanup cycle when rate-limited
-- `destroyServer()` catches `Exception` (not just `IOException`), fixing the CRW timer death bug for all exception types
-
-| File | Change |
-|------|--------|
-| `HetznerApiClient` | New: per-token client with rate-limit state, lazy auth, 401 invalidation |
-| `RateLimitInterceptor` | New: OkHttp interceptor for rate-limit header parsing |
-| `HetznerCloudResourceManager` | Replaced `ClientFactory.create()` with `HetznerApiClient.forCredentials()`, added API caches, rate-limit guards |
-| `HetznerCloud.provision()` | Rate-limit check before provisioning |
-| `OrphanedNodesCleaner` | Skip cleanup when rate-limited |
-| `Helper.assertValidResponse()` | Throws `HetznerProvisioningException` on HTTP 429 |
-
-### v103.percona.3: DC circuit breaker failover
-
-Per-datacenter circuit breakers that automatically route provisioning away from
-unhealthy Hetzner locations (e.g., during DC maintenance or API outages).
-
-| Component | Purpose |
-|-----------|---------|
-| `DcCircuitBreaker` | Per-DC state machine (CLOSED / OPEN / HALF_OPEN) |
-| `DcHealthTracker` | Tracks consecutive failures per location, ranks templates by DC health |
-| `HetznerProvisioningException` | Typed exception carrying HTTP status, Hetzner error code, and DC location |
-
-Behavior:
-- Triggers on HTTP 422 / `resource_unavailable` / `placement_error` / `server_limit_exceeded` from Hetzner API
-- 2-failure threshold trips the breaker for a DC
-- 5-minute auto-reset moves to HALF_OPEN, allowing a single probe request
-- Successful probe closes the breaker; failure re-opens it
-- `HetznerCloud.pickTemplate()` replaced with `rankTemplatesByHealth()` (healthy DCs first, shuffled within partitions)
-- `NodeCallable` rewritten with DC failover loop: iterates through ranked templates, tries each DC, records success/failure
-- All state is in-memory (resets on JVM restart)
-
-| File | Change |
-|------|--------|
-| `DcCircuitBreaker` | New: per-DC state machine with threshold and auto-reset |
-| `DcHealthTracker` | New: registry of breakers, `sortByHealth()` for template ranking |
-| `HetznerProvisioningException` | New: typed exception with `isRateLimited()`, `isConfigError()`, `isResourceUnavailable()` |
-| `HetznerCloud` | `pickTemplate()` -> `rankTemplatesByHealth()`, passes ranked list to `NodeCallable` |
-| `NodeCallable` | Complete rewrite with DC failover loop, cleanup on bootstrap failure |
-
-#### Observability via CLI
+### Observability via CLI
 
 The `jenkins hetzner` CLI provides structured access to DC health state:
 
@@ -149,41 +75,6 @@ jenkins hetzner fleet versions          # Plugin versions across all 10 instance
 ```
 
 All commands support `--json`, `--llm`, `--raw` output modes.
-
-### v103.percona.2: Architecture validation and null-safety
-
-Architecture validation to detect wrong CPU type provisioning, launcher null-safety, and deployment tooling.
-
-| File | Change |
-|------|--------|
-| `NodeCallable` | Architecture validation via `inferArchFromServerType()` (CAX* = arm64, else x86_64) and post-boot `uname -m` check via `UnameCallable` |
-| `OrphanedNodesCleaner` | Removed `setTemporarilyOffline()` call for ghost nodes, added race guard |
-| `DefaultConnectionMethod` | Null-safety for `publicNet` / `ipv4` with descriptive errors |
-| `DefaultV6ConnectionMethod` | Null-safety for `publicNet` / `ipv6` with descriptive errors |
-| `PublicAddressOnly` | Null-safety for `publicNet` / `ipv4` with descriptive errors |
-| `PublicV6AddressOnly` | Null-safety for `publicNet` / `ipv6`, `IllegalArgumentException` -> `IllegalStateException` |
-| `AbstractByLabelSelector` | `.findFirst().get()` -> `.findFirst().orElseThrow()` with descriptive error |
-
-### v103.percona.1: Retention bug fixes
-
-Fixes three bugs that cause idle Hetzner VMs to accumulate indefinitely:
-
-**Bug 1 (critical): `ComputerRetentionWork` timer death.** `destroyServer()` wraps `IOException` in `IllegalStateException`. This unchecked exception propagates through `CloudRetentionStrategy.check()` into `ComputerRetentionWork.doRun()`, permanently killing the periodic retention timer. After that, no idle node on the instance ever gets cleaned up until Jenkins restarts. Confirmed empirically: CRW was dead for 28 hours on two production instances.
-
-**Bug 2: One-directional orphan cleanup.** `OrphanedNodesCleaner` only removes VMs without Jenkins nodes. It does not remove Jenkins nodes without VMs (ghost nodes), which accumulate after API failures or restarts.
-
-**Bug 3: Null transient fields after restart.** `cloud`, `template`, and `serverInstance` are `transient` fields. After Jenkins restart/deserialization they are null, causing NPE in `_terminate()` and `isAlive()`.
-
-| File | Fix |
-|------|-----|
-| `HetznerServerAgent._terminate()` | Catch all exceptions (protects CRW timer), null guards for transient fields, safe launcher cast |
-| `HetznerServerAgent.isAlive()` | Full null safety, catch-all returning false |
-| `HetznerServerAgent.getDisplayName()` | Complete null chain protection |
-| `HetznerCloudResourceManager.destroyServer()` | Log-and-return on IOException instead of throwing IllegalStateException |
-| `HetznerCloudResourceManager.refreshServerInfo()` | Throws IOException (checked) instead of IllegalStateException |
-| `OrphanedNodesCleaner` | Bi-directional cleanup (VMs without nodes AND nodes without VMs), per-item try-catch, catch-all in doRun() |
-| `Helper.assertValidResponse()` | Null body guard |
-| `HelperTest` | Tests for null body and error response handling |
 
 ## Build
 
