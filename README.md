@@ -16,65 +16,7 @@
 
 # Hetzner Cloud Plugin for Jenkins (Percona patched fork)
 
-Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness, rate-limiting, retry, and DC failover patches.
-
-Current version: **v103.percona.26**.
-
-Full release notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-## Percona patches
-
-| Version | Summary |
-|---------|---------|
-| [v103.percona.26](CHANGELOG.md#v103percona26-2026-05-23) | Filter OPEN-breaker API storm; HALF_OPEN single-probe lease prevents concurrent stampede |
-| [v103.percona.25](CHANGELOG.md#v103percona25-2026-05-21) | Per-arch DC circuit breakers; `HetznerCloud` transient-field rehydration via `readResolve()` |
-| [v103.percona.24](CHANGELOG.md#v103percona24-2026-05-20) | Lazy-emit `arch=unknown` series only when a non-canonical SKU is observed |
-| [v103.percona.23](CHANGELOG.md#v103percona23-2026-05-20) | `arch` label (`amd64`/`arm64`/`unknown`) on `hetzner_running_servers` and `hetzner_orphan_servers_reaped_total` |
-| [v103.percona.22](CHANGELOG.md#v103percona22-2026-05-19) | Worker rehydration on master restart: re-adopt surviving Hetzner VMs as Jenkins agents (feature-flagged) |
-| [v103.percona.21](CHANGELOG.md#v103percona21-2026-05-19) | Persist DC circuit-breaker state to disk; stale-OPEN TTL clears old incidents on load |
-| [v103.percona.20](CHANGELOG.md#v103percona20-2026-05-18) | Deduplicate server entries from paged Hetzner API responses |
-| [v103.percona.19](CHANGELOG.md#v103percona19-2026-05-18) | Hung-build detection: extract `Run` from Pipeline `PlaceholderExecutable` |
-| [v103.percona.18](CHANGELOG.md#v103percona18-2026-05-18) | `HungBuildDetector` correctness: synchronized scan, stale gauge cleanup, drop in-plugin `master` label |
-| [v103.percona.17](CHANGELOG.md#v103percona17-2026-05-16) | `HungBuildDetector` with `hetzner_stuck_builds_total`, `hetzner_oldest_build_age_seconds`, real-busy executor gauge |
-| [v103.percona.16](CHANGELOG.md#v103percona16-2026-05-15) | `HetznerMetricsRefresher` (PeriodicWork): prevent `hetzner_running_servers` from pinning on idle clouds |
-| [v103.percona.15](CHANGELOG.md#v103percona15-2026-05-15) | `hetzner_plugin_info.jenkins_version` reads live `Jenkins.getVersion()` instead of hard-coded `"2.479"` |
-| [v103.percona.14](CHANGELOG.md#v103percona14-2026-05-12) | Wait for `cloud-init` + `java` before exec'ing remoting JVM; fixes `bootstrap_io` on stock images |
-| [v103.percona.13](CHANGELOG.md#v103percona13-2026-05-11) | Justfile pin bump |
-| [v103.percona.12](CHANGELOG.md#v103percona12-2026-05-12) | `NodeCallable` hardening, loopback gate, outcome enum, DC health gate |
-| [v103.percona.11](CHANGELOG.md#v103percona11-2026-05-08) | `UnprotectedRootAction` on `/hetzner-prometheus`; enables anonymous loopback scrape by Alloy |
-| [v103.percona.10](CHANGELOG.md#v103percona10-2026-05-07) | Drop `SYSTEM_READ` permission gate inside `HetznerPrometheusEndpoint.doIndex()` |
-| [v103.percona.9](CHANGELOG.md#v103percona9-2026-05-07) | Self-contained `/hetzner-prometheus` Stapler endpoint; bundles `simpleclient` (PS-10997 Phase 1) |
-| [v103.percona.8](CHANGELOG.md#v103percona8-2026-05-07) | Initial Prometheus metrics scaffolding (PS-10997) |
-| [v103.percona.7](CHANGELOG.md#v103percona7-2026-04-07) | SSH retry backoff, log level fixes, robustness cleanups |
-| [v103.percona.6](CHANGELOG.md#v103percona6-2026-04-07) | Rate-limit code review follow-ups |
-| [v103.percona.5](CHANGELOG.md#v103percona5-2026-04-01) | `RetryInterceptor` (exponential backoff + jitter) and `TemplateErrorTracker` (30-min suppression) |
-| [v103.percona.4](CHANGELOG.md#v103percona4-2026-03-22) | `HetznerApiClient` per-token client; `RateLimitInterceptor`; Guava API caches (SSH keys, labels, server lists) |
-| [v103.percona.3](CHANGELOG.md#v103percona3-2026-03-19) | DC circuit breaker failover: `DcCircuitBreaker`, `DcHealthTracker`, `HetznerProvisioningException`, failover loop in `NodeCallable` |
-| [v103.percona.2](CHANGELOG.md#v103percona2-2026-03-19) | Architecture validation (`inferArchFromServerType`); launcher null-safety; deployment tooling |
-| [v103.percona.1](CHANGELOG.md#v103percona1-2026-03-19) | CRW timer death fix; bidirectional orphan cleanup; null-safe transient fields after deserialization |
-
-### Observability via CLI
-
-The `jenkins hetzner` CLI provides structured access to DC health state:
-
-```bash
-# Single instance
-jenkins hetzner -i rel health           # DC breaker status
-jenkins hetzner -i rel status           # Overview (plugin + clouds + DCs + nodes)
-jenkins hetzner -i rel nodes            # Active hcloud-* workers
-jenkins hetzner -i rel servers          # Running VMs from Hetzner API
-jenkins hetzner -i rel templates        # Configured server templates
-jenkins hetzner -i rel version          # Plugin version + MD5
-jenkins hetzner -i rel orphans          # Orphan VMs + ghost nodes
-jenkins hetzner -i rel reset [dc]       # Reset circuit breaker
-jenkins hetzner -i rel trip <dc>        # Simulate DC failure
-
-# Fleet-wide
-jenkins hetzner fleet health            # DC health across all 10 instances
-jenkins hetzner fleet versions          # Plugin versions across all 10 instances
-```
-
-All commands support `--json`, `--llm`, `--raw` output modes.
+Forked from [jenkinsci/hetzner-cloud-plugin](https://github.com/jenkinsci/hetzner-cloud-plugin) v103 with robustness, rate-limiting, retry, and DC failover patches. Current version: **v103.percona.26**. All patch details and per-version release notes are in **[CHANGELOG.md](CHANGELOG.md)**.
 
 ## Build
 
